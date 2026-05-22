@@ -1,6 +1,4 @@
-// app/layout.js
 import { Providers } from './providers';
-import { FarcasterProvider } from '@/components/FarcasterProvider';
 import './globals.css';
 
 export const metadata = {
@@ -156,11 +154,9 @@ export default function RootLayout({ children }) {
         <meta name="theme-color" content="#7c3aed" />
       </head>
       <body className="bg-gradient-to-br from-slate-900 via-purple-900/20 to-slate-900 min-h-screen antialiased" suppressHydrationWarning>
-        <FarcasterProvider>
-          <Providers>
-            {children}
-          </Providers>
-        </FarcasterProvider>
+        <Providers>
+          {children}
+        </Providers>
       </body>
     </html>
   );
