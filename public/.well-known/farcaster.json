@@ -14,6 +14,7 @@
     "splashBackgroundColor": "#7c3aed",
     "buttonTitle": "Launch VerifySwap",
     "subtitle": "The safest way to swap on Base",
+    "tagline": "Swap with confidence",
     "description": "VerifySwap: The safest way to swap on Base. Real-time scam detection, honeypot checker, and Farcaster trust scores. Swap with confidence.",
     "primaryCategory": "finance",
     "tags": ["swap", "defi", "base", "crypto", "security"],
@@ -21,6 +22,12 @@
       "https://verifyswap.vercel.app/screenshot-1.png",
       "https://verifyswap.vercel.app/screenshot-2.png"
     ],
+    "heroImageUrl": "https://verifyswap.vercel.app/og-image.png",
+    "ogTitle": "VerifySwap - The Safest Way to Swap on Base",
+    "ogDescription": "Real-time scam detection, honeypot checker, and Farcaster trust scores",
+    "ogImageUrl": "https://verifyswap.vercel.app/og-image.png",
+    "webhookUrl": "https://verifyswap.vercel.app/api/webhook",
+    "castShareUrl": "https://verifyswap.vercel.app/share",
     "requiredChains": ["eip155:8453"],
     "requiredCapabilities": ["actions.ready", "actions.signIn"]
   }
