@@ -1,0 +1,18 @@
+{
+  "accountAssociation": {
+    "header": "{{GENERATED_HEADER}}",
+    "payload": "{{GENERATED_PAYLOAD}}",
+    "signature": "{{GENERATED_SIGNATURE}}"
+  },
+  "miniapp": {
+    "version": "1",
+    "name": "VerifySwap",
+    "description": "Swap tokens securely on Base network with real-time trust score",
+    "iconUrl": "https://verifyswap.vercel.app/icon.png",
+    "homeUrl": "https://verifyswap.vercel.app",
+    "canonicalDomain": "verifyswap.vercel.app",
+    "requiredChains": ["eip155:8453"],
+    "tags": ["swap", "defi", "base", "crypto"],
+    "requiredCapabilities": ["actions.ready", "actions.signIn"]
+  }
+}
