@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAccount } from 'wagmi';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { motion, AnimatePresence } from 'framer-motion';
 import SearchBar from '@/components/SearchBar';
 import SearchHistory from '@/components/SearchHistory';
@@ -11,6 +10,7 @@ import SwapWidget from '@/components/SwapWidget';
 import TrustScore from '@/components/TrustScore';
 import TokenIcon from '@/components/TokenIcon';
 import TrendingTokens from '@/components/TrendingTokens';
+import { FarcasterWalletConnector } from '@/components/FarcasterWalletConnector';
 
 export default function Home() {
   // ============ WALLET HOOKS ============
@@ -104,9 +104,9 @@ export default function Home() {
             <span className="text-sm text-blue-300">Base Network</span>
           </div>
           
-          {/* Connect Button - Tanpa teks Connected dan alamat tambahan */}
+          {/* Connect Button - Menggunakan FarcasterWalletConnector */}
           <div className="flex items-center gap-3">
-            <ConnectButton />
+            <FarcasterWalletConnector />
           </div>
         </div>
       </nav>
@@ -278,7 +278,7 @@ export default function Home() {
             </AnimatePresence>
           </div>
 
-          {/* Trending Tokens Section - NEW */}
+          {/* Trending Tokens Section */}
           <div className="mb-6">
             <TrendingTokens onSelectToken={handleTrendingTokenSelect} limit={8} />
           </div>
