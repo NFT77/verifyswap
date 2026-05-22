@@ -6,6 +6,7 @@ import { WagmiProvider } from 'wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { base } from 'wagmi/chains';
 import { getDefaultConfig } from '@rainbow-me/rainbowkit';
+import { farcasterMiniAppConnector } from '@farcaster/miniapp-wagmi-connector';
 
 import '@rainbow-me/rainbowkit/styles.css';
 
@@ -15,12 +16,22 @@ if (!projectId) {
   console.warn('NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID not set');
 }
 
-const wagmiConfig = getDefaultConfig({
+// Konfigurasi dasar dari RainbowKit
+const rainbowKitConfig = getDefaultConfig({
   appName: 'VerifySwap',
   projectId: projectId || 'dummy',
   chains: [base],
   ssr: true,
 });
+
+// Gabungkan dengan connector Farcaster
+const wagmiConfig = {
+  ...rainbowKitConfig,
+  connectors: [
+    ...(rainbowKitConfig.connectors || []),
+    farcasterMiniAppConnector(),
+  ],
+};
 
 const queryClient = new QueryClient();
 

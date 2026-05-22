@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@farcaster/miniapp-sdk": "^0.3.0",
+    "@farcaster/miniapp-wagmi-connector": "^2.0.0",
     "@rainbow-me/rainbowkit": "^2.2.0",
     "@solana/wallet-adapter-base": "^0.9.23",
     "@tanstack/react-query": "^5.66.0",
