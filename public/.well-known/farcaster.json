@@ -16,7 +16,7 @@
     "subtitle": "The safest way to swap on Base",
     "description": "Swap tokens securely on Base network with real-time trust score, honeypot detection, and Farcaster creator verification. Only 0.3% fee.",
     "primaryCategory": "finance",
-    "tags": ["swap", "defi", "base", "crypto", "trading", "security"],
+    "tags": ["swap", "defi", "base", "crypto", "security"],
     "screenshotUrls": [
       "https://verifyswap.vercel.app/screenshot-1.png",
       "https://verifyswap.vercel.app/screenshot-2.png"
