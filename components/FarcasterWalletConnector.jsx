@@ -16,15 +16,18 @@ export function FarcasterWalletConnector() {
     setInFarcaster(isInFarcaster());
   }, []);
 
-  // Cari Farcaster mini app connector
+  // Cari Farcaster mini app connector - PERBAIKAN NAMA ID
   const farcasterConnector = connectors.find(
-    (connector) => connector.id === 'miniapp' || connector.name === 'Farcaster Mini App'
+    (connector) => connector.id === 'farcaster-miniapp' || // ✅ Perbaikan: 'farcaster-miniapp'
+      connector.name === 'Farcaster Mini App' ||
+      connector.id === 'miniapp'
   );
 
   // Fungsi connect khusus untuk Farcaster menggunakan wagmi
   const connectFarcasterWallet = async () => {
     if (!farcasterConnector) {
       console.error('❌ Farcaster connector not found');
+      console.log('Available connectors:', connectors.map(c => ({ id: c.id, name: c.name }))); // Debug
       alert('Farcaster connector not found. Please reload the app.');
       return;
     }
