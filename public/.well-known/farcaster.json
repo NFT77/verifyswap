@@ -7,12 +7,21 @@
   "miniapp": {
     "version": "1",
     "name": "VerifySwap",
-    "description": "Swap tokens securely on Base network with real-time trust score",
     "iconUrl": "https://verifyswap.vercel.app/icon.png",
     "homeUrl": "https://verifyswap.vercel.app",
-    "canonicalDomain": "verifyswap.vercel.app",
+    "imageUrl": "https://verifyswap.vercel.app/og-image.png",
+    "splashImageUrl": "https://verifyswap.vercel.app/splash.png",
+    "splashBackgroundColor": "#7c3aed",
+    "buttonTitle": "Launch VerifySwap",
+    "subtitle": "The safest way to swap on Base",
+    "description": "Swap tokens securely on Base network with real-time trust score, honeypot detection, and Farcaster creator verification. Only 0.3% fee.",
+    "primaryCategory": "finance",
+    "tags": ["swap", "defi", "base", "crypto", "trading", "security"],
+    "screenshotUrls": [
+      "https://verifyswap.vercel.app/screenshot-1.png",
+      "https://verifyswap.vercel.app/screenshot-2.png"
+    ],
     "requiredChains": ["eip155:8453"],
-    "tags": ["swap", "defi", "base", "crypto"],
     "requiredCapabilities": ["actions.ready", "actions.signIn"]
   }
 }
