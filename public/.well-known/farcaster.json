@@ -23,7 +23,7 @@
       "https://verifyswap.vercel.app/screenshot-2.png"
     ],
     "heroImageUrl": "https://verifyswap.vercel.app/og-image.png",
-    "ogTitle": "VerifySwap - The Safest Way to Swap on Base",
+    "ogTitle": "VerifySwap: Safe Base Swap",
     "ogDescription": "Real-time scam detection, honeypot checker, and Farcaster trust scores",
     "ogImageUrl": "https://verifyswap.vercel.app/og-image.png",
     "webhookUrl": "https://verifyswap.vercel.app/api/webhook",
