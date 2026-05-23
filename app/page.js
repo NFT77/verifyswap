@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useAccount } from 'wagmi';
 import SearchBar from '@/components/SearchBar';
 import SearchHistory from '@/components/SearchHistory';
@@ -11,7 +11,7 @@ import TokenIcon from '@/components/TokenIcon';
 import TrendingTokens from '@/components/TrendingTokens';
 import { FarcasterWalletConnector } from '@/components/FarcasterWalletConnector';
 
-// Safe fetch wrapper — fresh AbortController each call
+// Safe fetch with timeout
 async function safeFetch(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -38,12 +38,27 @@ export default function Home() {
 
   const swapSectionRef = useRef(null);
 
+  // ✅ FIXED: guard against concurrent/duplicate search calls.
+  // The Vercel logs showed search being called 10+ times simultaneously —
+  // caused by TrendingTokens logo fetches each calling /api/search.
+  // This ref ensures only one search runs at a time from the user's input.
+  const isSearchingRef = useRef(false);
+  const lastQueryRef = useRef('');
+
   const handleImageError = useCallback((fid) => {
     setImageErrors(prev => ({ ...prev, [fid]: true }));
   }, []);
 
   const handleSearch = useCallback(async (query) => {
-    if (!query || query.trim() === '') return;
+    const trimmed = query?.trim();
+    if (!trimmed) return;
+
+    // Skip if same query already in progress or just completed
+    if (isSearchingRef.current) return;
+    if (lastQueryRef.current === trimmed && searchResult && !searchResult.error) return;
+
+    isSearchingRef.current = true;
+    lastQueryRef.current = trimmed;
 
     setIsLoading(true);
     setSearchResult(null);
@@ -53,14 +68,12 @@ export default function Home() {
 
     try {
       const res = await safeFetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}&chain=base`,
+        `/api/search?q=${encodeURIComponent(trimmed)}&chain=base`,
         {},
         15000
       );
 
-      if (!res.ok) {
-        throw new Error(`Search failed with status ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Search failed: ${res.status}`);
 
       const data = await res.json();
       setSearchResult(data);
@@ -75,9 +88,9 @@ export default function Home() {
         !data.notFound &&
         !data.error
       ) {
-        window.addToSearchHistory(query.trim(), {
-          name: data.token?.name || data.profile?.displayName || query,
-          symbol: data.token?.symbol || data.profile?.username || query,
+        window.addToSearchHistory(trimmed, {
+          name: data.token?.name || data.profile?.displayName || trimmed,
+          symbol: data.token?.symbol || data.profile?.username || trimmed,
           type: data.type || 'search',
         });
       }
@@ -90,8 +103,9 @@ export default function Home() {
       setSearchResult({ error: msg });
     } finally {
       setIsLoading(false);
+      isSearchingRef.current = false;
     }
-  }, []);
+  }, [searchResult]);
 
   const handleSwapButtonClick = useCallback((token) => {
     setSelectedToken(token);
@@ -104,6 +118,9 @@ export default function Home() {
     setRefreshPortfolio(prev => prev + 1);
   }, []);
 
+  // ✅ TrendingTokens calls handleSearch(token.address) — this is fine
+  // because TrendingTokens logo fetches now go directly to /api/search
+  // internally (fixed in TrendingTokens.jsx) and do NOT call this handler.
   const handleTrendingTokenSelect = useCallback((token) => {
     handleSearch(token.address);
   }, [handleSearch]);
@@ -135,7 +152,6 @@ export default function Home() {
               VerifySwap
             </span>
           </div>
-
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-blue-500/20 rounded-full">
             <img
               src="https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png"
@@ -144,7 +160,6 @@ export default function Home() {
             />
             <span className="text-sm text-blue-300">Base Network</span>
           </div>
-
           <div className="flex items-center gap-3">
             <FarcasterWalletConnector />
           </div>
@@ -194,14 +209,12 @@ export default function Home() {
               placeholder="Search by Token Address, FID, or Username..."
             />
 
-            {/* Search Results — plain conditional, no framer-motion in Farcaster */}
             {searchResult && !isLoading && (
               <div className="mt-6">
                 {searchResult.error ? (
                   <div className="text-center py-8 text-red-400">{searchResult.error}</div>
                 ) : searchResult.type === 'token' && !searchResult.notFound ? (
                   <div className="space-y-4">
-                    {/* Token Card */}
                     <div className="flex items-center gap-4 p-4 bg-gradient-to-r from-purple-500/10 to-blue-500/10 rounded-xl border border-purple-500/20">
                       <TokenIcon
                         tokenAddress={searchResult.token?.address}
@@ -240,71 +253,40 @@ export default function Home() {
                         <span>🛡️</span> Security Scan Results for {searchResult.token?.symbol}
                       </h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm mb-4">
-                        <div className={`flex items-center justify-between p-2 rounded-lg ${searchResult.token?.isHoneypot ? 'bg-red-500/30 text-red-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>{searchResult.token?.isHoneypot ? '🔴' : '🟢'}</span>
-                            <span>Honeypot</span>
+                        {[
+                          { label: 'Honeypot', value: searchResult.token?.isHoneypot, bad: true, badText: 'DETECTED', goodText: 'CLEAR' },
+                          { label: 'Fake Volume', value: searchResult.token?.isFakeVolume, bad: true, badText: 'SUSPICIOUS', goodText: 'CLEAR' },
+                          { label: 'Contract Verified', value: !searchResult.token?.isVerified, bad: true, badText: 'UNVERIFIED', goodText: 'VERIFIED' },
+                          { label: 'Mintable', value: searchResult.token?.isMintable, bad: true, badText: 'YES', goodText: 'NO' },
+                          { label: 'Owner Renounced', value: !searchResult.token?.isOwnerRenounced, bad: true, badText: 'NO', goodText: 'YES' },
+                        ].map(({ label, value, bad, badText, goodText }) => (
+                          <div key={label} className={`flex items-center justify-between p-2 rounded-lg ${value ? 'bg-yellow-500/30 text-yellow-400' : 'bg-green-500/30 text-green-400'}`}>
+                            <div className="flex items-center gap-2">
+                              <span>{value ? '⚠️' : '✅'}</span>
+                              <span>{label}</span>
+                            </div>
+                            <span className="text-xs font-mono">{value ? badText : goodText}</span>
                           </div>
-                          <span className="text-xs font-mono">{searchResult.token?.isHoneypot ? 'DETECTED' : 'CLEAR'}</span>
-                        </div>
-                        <div className={`flex items-center justify-between p-2 rounded-lg ${searchResult.token?.isFakeVolume ? 'bg-red-500/30 text-red-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>{searchResult.token?.isFakeVolume ? '🔴' : '🟢'}</span>
-                            <span>Fake Volume</span>
-                          </div>
-                          <span className="text-xs font-mono">{searchResult.token?.isFakeVolume ? 'SUSPICIOUS' : 'CLEAR'}</span>
-                        </div>
-                        <div className={`flex items-center justify-between p-2 rounded-lg ${!searchResult.token?.isVerified ? 'bg-yellow-500/30 text-yellow-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>{searchResult.token?.isVerified ? '🟢' : '🟡'}</span>
-                            <span>Contract Verified</span>
-                          </div>
-                          <span className="text-xs font-mono">{searchResult.token?.isVerified ? 'VERIFIED' : 'UNVERIFIED'}</span>
-                        </div>
-                        <div className={`flex items-center justify-between p-2 rounded-lg ${searchResult.token?.isMintable ? 'bg-yellow-500/30 text-yellow-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>{searchResult.token?.isMintable ? '⚠️' : '✅'}</span>
-                            <span>Mintable</span>
-                          </div>
-                          <span className="text-xs font-mono">{searchResult.token?.isMintable ? 'YES' : 'NO'}</span>
-                        </div>
-                        <div className={`flex items-center justify-between p-2 rounded-lg ${!searchResult.token?.isOwnerRenounced ? 'bg-yellow-500/30 text-yellow-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>{searchResult.token?.isOwnerRenounced ? '✅' : '⚠️'}</span>
-                            <span>Owner Renounced</span>
-                          </div>
-                          <span className="text-xs font-mono">{searchResult.token?.isOwnerRenounced ? 'YES' : 'NO'}</span>
-                        </div>
+                        ))}
                         <div className={`flex items-center justify-between p-2 rounded-lg ${(searchResult.token?.holderCount || 0) < 100 ? 'bg-yellow-500/30 text-yellow-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>👥</span>
-                            <span>Holders</span>
-                          </div>
+                          <div className="flex items-center gap-2"><span>👥</span><span>Holders</span></div>
                           <span className="text-xs font-mono">{searchResult.token?.holderCount?.toLocaleString() || 'N/A'}</span>
                         </div>
                         <div className={`flex items-center justify-between p-2 rounded-lg ${(searchResult.token?.top10HolderRate || 0) > 50 ? 'bg-red-500/30 text-red-400' : (searchResult.token?.top10HolderRate || 0) > 30 ? 'bg-yellow-500/30 text-yellow-400' : 'bg-green-500/30 text-green-400'}`}>
-                          <div className="flex items-center gap-2">
-                            <span>📊</span>
-                            <span>Top 10 Holders</span>
-                          </div>
-                          <span className="text-xs font-mono">{searchResult.token?.top10HolderRate ? `${searchResult.token.top10HolderRate}%` : 'N/A'}</span>
+                          <div className="flex items-center gap-2"><span>📊</span><span>Top 10 Holders</span></div>
+                          <span className="text-xs font-mono">{searchResult.token?.top10HolderRate ? `${searchResult.token.top10HolderRate.toFixed(1)}%` : 'N/A'}</span>
                         </div>
                         <div className={`col-span-2 flex items-center justify-between p-2 rounded-lg ${
-                          searchResult.token?.riskLevel === 'critical' || searchResult.token?.riskLevel === 'high'
-                            ? 'bg-red-500/30 text-red-400'
-                            : searchResult.token?.riskLevel === 'medium'
-                            ? 'bg-yellow-500/30 text-yellow-400'
-                            : 'bg-green-500/30 text-green-400'
+                          ['critical', 'high'].includes(searchResult.token?.riskLevel) ? 'bg-red-500/30 text-red-400' :
+                          searchResult.token?.riskLevel === 'medium' ? 'bg-yellow-500/30 text-yellow-400' :
+                          'bg-green-500/30 text-green-400'
                         }`}>
-                          <div className="flex items-center gap-2">
-                            <span>⚠️</span>
-                            <span>Risk Level</span>
-                          </div>
+                          <div className="flex items-center gap-2"><span>⚠️</span><span>Risk Level</span></div>
                           <span className="text-xs font-mono uppercase">{searchResult.token?.riskLevel || 'UNKNOWN'}</span>
                         </div>
                       </div>
 
-                      {searchResult.token?.riskFactors && searchResult.token.riskFactors.length > 0 && (
+                      {searchResult.token?.riskFactors?.length > 0 && (
                         <div className="mt-3 p-2 bg-red-500/10 rounded-lg">
                           <p className="text-xs text-red-300 mb-1">⚠️ Risk Factors:</p>
                           <ul className="text-xs text-gray-300 list-disc list-inside">
@@ -312,32 +294,30 @@ export default function Home() {
                               <li key={idx}>{factor}</li>
                             ))}
                             {searchResult.token.riskFactors.length > 5 && (
-                              <li className="text-gray-500">+{searchResult.token.riskFactors.length - 5} more risks</li>
+                              <li className="text-gray-500">+{searchResult.token.riskFactors.length - 5} more</li>
                             )}
                           </ul>
                         </div>
                       )}
 
                       <div className={`mt-3 p-2 rounded-lg text-center text-xs ${
-                        searchResult.token?.riskLevel === 'critical' || searchResult.token?.isHoneypot
+                        searchResult.token?.isHoneypot || ['critical', 'high'].includes(searchResult.token?.riskLevel)
                           ? 'bg-red-500/30 text-red-200'
-                          : searchResult.token?.riskLevel === 'high'
-                          ? 'bg-red-500/30 text-red-200'
-                          : searchResult.token?.riskLevel === 'medium' || searchResult.token?.isFakeVolume || !searchResult.token?.isVerified
+                          : searchResult.token?.riskLevel === 'medium'
                           ? 'bg-yellow-500/30 text-yellow-200'
                           : 'bg-green-500/30 text-green-200'
                       }`}>
                         {searchResult.token?.isHoneypot
-                          ? '🔴 CRITICAL: Honeypot detected! DO NOT BUY! You cannot sell this token.'
-                          : searchResult.token?.riskLevel === 'critical' || searchResult.token?.riskLevel === 'high'
-                          ? '⚠️ HIGH RISK: This token has multiple red flags. Avoid swapping!'
+                          ? '🔴 CRITICAL: Honeypot detected! DO NOT BUY!'
+                          : ['critical', 'high'].includes(searchResult.token?.riskLevel)
+                          ? '⚠️ HIGH RISK: Multiple red flags detected.'
                           : searchResult.token?.riskLevel === 'medium'
-                          ? '⚠️ MEDIUM RISK: Proceed with caution. Do your own research.'
+                          ? '⚠️ MEDIUM RISK: Proceed with caution. DYOR.'
                           : '✅ LOW RISK: No critical issues detected. Still DYOR.'}
                       </div>
 
                       <p className="text-gray-500 text-xs mt-2 text-center">
-                        📊 Price & Liquidity: DexScreener | 🖼️ Logo: CoinGecko / Moralis | 🔒 Security: GoPlus Labs + Etherscan
+                        📊 DexScreener | 🖼️ CoinGecko / Moralis | 🔒 GoPlus Labs + Etherscan
                       </p>
                     </div>
                   </div>
@@ -359,7 +339,9 @@ export default function Home() {
                       <h3 className="text-xl font-bold text-white">@{searchResult.profile?.username}</h3>
                       <p className="text-gray-400 text-sm">{searchResult.profile?.displayName}</p>
                       {searchResult.profile?.followerCount > 0 && (
-                        <p className="text-xs text-gray-500">👥 {searchResult.profile.followerCount.toLocaleString()} followers</p>
+                        <p className="text-xs text-gray-500">
+                          👥 {searchResult.profile.followerCount.toLocaleString()} followers
+                        </p>
                       )}
                     </div>
                     <div className="text-right">

@@ -15,9 +15,8 @@ export async function OPTIONS() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-// In-memory quote cache (2 second TTL)
 const quoteCache = new Map();
-const CACHE_TTL = 2_000;
+const CACHE_TTL = 3000;
 
 function getCacheKey(tokenIn, tokenOut, amount, slippage) {
   return `base:${tokenIn}:${tokenOut}:${amount}:${slippage}`;
@@ -38,7 +37,6 @@ function setCachedQuote(key, data) {
   quoteCache.set(key, { data, timestamp: Date.now() });
 }
 
-// Always creates a fresh AbortController — safe for Farcaster server-side
 async function fetchWithTimeout(url, options = {}, ms = 8000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ms);
@@ -53,6 +51,8 @@ async function fetchWithTimeout(url, options = {}, ms = 8000) {
   }
 }
 
+const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const chain = searchParams.get('chain');
@@ -61,7 +61,6 @@ export async function GET(request) {
   const amount = searchParams.get('amount');
   const slippage = parseFloat(searchParams.get('slippage') || '0.5');
 
-  // Parameter validation
   if (!chain || !tokenOut || !amount) {
     return NextResponse.json(
       { error: 'Missing parameters: chain, tokenOut, amount are required' },
@@ -79,33 +78,32 @@ export async function GET(request) {
   const amountNum = parseFloat(amount);
   if (isNaN(amountNum) || amountNum <= 0) {
     return NextResponse.json(
-      { error: 'Invalid amount: must be a positive number' },
+      { error: 'Invalid amount' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
   if (isNaN(slippage) || slippage < 0 || slippage > 50) {
     return NextResponse.json(
-      { error: 'Invalid slippage: must be between 0 and 50' },
+      { error: 'Invalid slippage' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
   if (!tokenIn || (!tokenIn.startsWith('0x') && tokenIn !== 'ETH')) {
     return NextResponse.json(
-      { error: 'Invalid tokenIn format for Base chain' },
+      { error: 'Invalid tokenIn format' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
-  if (!tokenOut || !tokenOut.startsWith('0x')) {
+  if (!tokenOut.startsWith('0x')) {
     return NextResponse.json(
-      { error: 'Invalid tokenOut format for Base chain' },
+      { error: 'Invalid tokenOut format' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
-  // Check cache
   const cacheKey = getCacheKey(tokenIn, tokenOut, amount, slippage);
   const cachedResult = getCachedQuote(cacheKey);
   if (cachedResult) {
@@ -113,7 +111,7 @@ export async function GET(request) {
   }
 
   try {
-    // --- Attempt 1: OKX DEX Aggregator ---
+    // ── Attempt 1: OKX Quote (public endpoint, no auth needed) ──────────
     let okxQuote = null;
     try {
       okxQuote = await Promise.race([
@@ -148,11 +146,10 @@ export async function GET(request) {
       return NextResponse.json(response, { headers: CORS_HEADERS });
     }
 
-    // --- Attempt 2: Uniswap V3 Direct ---
-    console.log('OKX failed, falling back to Uniswap V3');
-    const tokenInAddress = tokenIn === 'ETH'
-      ? '0x4200000000000000000000000000000000000006'
-      : tokenIn;
+    // ── Attempt 2: Uniswap V3 on-chain QuoterV2 (no API key needed) ─────
+    console.log('OKX quote failed, using on-chain QuoterV2');
+
+    const tokenInAddress = tokenIn === 'ETH' ? WETH_ADDRESS : tokenIn;
     const amountInWei = BigInt(Math.floor(amountNum * 1e18)).toString();
 
     let uniswapQuote = null;
@@ -164,10 +161,10 @@ export async function GET(request) {
           amountIn: amountInWei,
           slippage,
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Uniswap timeout')), 10000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('QuoterV2 timeout')), 12000)),
       ]);
     } catch (e) {
-      console.error('Uniswap quote error:', e.message);
+      console.error('QuoterV2 error:', e.message);
     }
 
     if (uniswapQuote?.success) {
@@ -189,10 +186,8 @@ export async function GET(request) {
           routerAddress: '0x2626664c2603336E57B271c5C0b26F421741e481',
           percent: 100,
         }],
-        estimatedGas: uniswapQuote.estimatedGasUsed
-          ? parseFloat(uniswapQuote.estimatedGasUsed) / 1e18
-          : 0.001,
-        source: 'uniswap',
+        estimatedGas: 0.001,
+        source: 'uniswap_onchain',
         rawQuote: uniswapQuote.raw,
         timestamp: Date.now(),
       };
@@ -200,8 +195,8 @@ export async function GET(request) {
       return NextResponse.json(response, { headers: CORS_HEADERS });
     }
 
-    // --- Attempt 3: DexScreener Fallback ---
-    console.warn('Uniswap also failed, falling back to DexScreener');
+    // ── Attempt 3: DexScreener price fallback ────────────────────────────
+    console.warn('QuoterV2 also failed, using DexScreener price fallback');
     try {
       const [ethRes, dexRes] = await Promise.all([
         fetchWithTimeout(
