@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAccount, useConnect, useDisconnect } from 'wagmi';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 
@@ -12,115 +12,128 @@ export function FarcasterWalletConnector() {
   const [inFarcaster, setInFarcaster] = useState(false);
   const [sdkReady, setSdkReady] = useState(false);
   const [autoConnectDone, setAutoConnectDone] = useState(false);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const reconnectAttempts = useRef(0);
 
-  // ✅ Deteksi Farcaster + panggil ready() via SDK
+  // Detect Farcaster environment
   useEffect(() => {
+    let cancelled = false;
     const init = async () => {
       try {
         const { sdk } = await import('@farcaster/miniapp-sdk');
-        const context = await sdk.context;
-
-        if (context?.user?.fid) {
+        const context = await Promise.race([
+          sdk.context,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('SDK timeout')), 3000)),
+        ]);
+        if (!cancelled && context?.user?.fid) {
           setInFarcaster(true);
-          await sdk.actions.ready();
-          console.log('✅ Farcaster Mini App ready');
+          await sdk.actions.ready({ disableNativeGestures: false });
+          console.log('✅ Farcaster Mini App ready, FID:', context.user.fid);
         }
       } catch (error) {
-        console.log('Not in Farcaster environment:', error);
+        console.log('Browser mode:', error?.message);
       } finally {
-        setSdkReady(true);
+        if (!cancelled) setSdkReady(true);
       }
     };
     init();
+    return () => { cancelled = true; };
   }, []);
 
-  // ✅ Cari connector dengan beberapa kemungkinan ID
+  // Find farcaster connector — memo-stable reference
   const farcasterConnector = connectors.find(
     (c) => c.id === 'farcasterFrame' || c.id === 'farcaster-miniapp' || c.id === 'miniapp'
   );
 
-  // ✅ Auto-connect Warplet dengan retry logic untuk desktop
+  // ✅ FIXED: wrap connect call in useCallback so dependency arrays are stable
+  const attemptConnect = useCallback(async () => {
+    if (!farcasterConnector) return;
+    try {
+      await connect({ connector: farcasterConnector });
+      console.log('✅ Farcaster wallet connected');
+    } catch (err) {
+      console.error('Connect error:', err.message);
+    }
+  }, [connect, farcasterConnector]);
+
+  // Auto-connect on mount in Farcaster
   useEffect(() => {
     if (
-      inFarcaster &&
-      sdkReady &&
-      !isConnected &&
-      status !== 'connecting' &&
-      !isPending &&
-      !autoConnectDone &&
-      farcasterConnector &&
-      reconnectAttempts < 3
-    ) {
-      const timer = setTimeout(() => {
-        console.log(`🔄 Auto-connect attempt ${reconnectAttempts + 1}`);
-        connect({ connector: farcasterConnector }).catch((err) => {
-          console.error('Auto-connect error:', err);
-        });
-        setAutoConnectDone(true);
-        setReconnectAttempts(prev => prev + 1);
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [inFarcaster, sdkReady, isConnected, status, isPending, autoConnectDone, farcasterConnector, connect, reconnectAttempts]);
+      !inFarcaster ||
+      !sdkReady ||
+      isConnected ||
+      status === 'connecting' ||
+      isPending ||
+      autoConnectDone ||
+      !farcasterConnector ||
+      reconnectAttempts.current >= 3
+    ) return;
 
-  // ✅ Reset autoConnectDone jika koneksi gagal dan masih dalam Farcaster
+    const timer = setTimeout(() => {
+      console.log(`🔄 Auto-connect attempt ${reconnectAttempts.current + 1}`);
+      reconnectAttempts.current += 1;
+      setAutoConnectDone(true);
+      attemptConnect();
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [inFarcaster, sdkReady, isConnected, status, isPending, autoConnectDone, farcasterConnector, attemptConnect]);
+
+  // Retry if auto-connect failed
   useEffect(() => {
-    if (inFarcaster && !isConnected && autoConnectDone && status !== 'connecting') {
-      const timer = setTimeout(() => {
-        if (!isConnected && reconnectAttempts < 3) {
-          console.log('🔄 Resetting auto-connect for retry');
-          setAutoConnectDone(false);
-        }
-      }, 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [inFarcaster, isConnected, autoConnectDone, status, reconnectAttempts]);
+    if (
+      !inFarcaster ||
+      !autoConnectDone ||
+      isConnected ||
+      status === 'connecting' ||
+      reconnectAttempts.current >= 3
+    ) return;
 
-  // ✅ Cek apakah wallet terhubung dengan benar (fix untuk desktop bug)
-  const isWalletProperlyConnected = () => {
-    if (!isConnected) return false;
-    if (farcasterConnector && typeof farcasterConnector.getChainId !== 'function') {
-      console.warn('⚠️ Wallet connector missing getChainId, attempting reconnect...');
-      return false;
-    }
-    return true;
-  };
+    const timer = setTimeout(() => {
+      console.log('🔄 Retrying auto-connect...');
+      setAutoConnectDone(false);
+    }, 2500);
 
-  // ✅ Force reconnect jika wallet tidak terhubung dengan benar (desktop bug fix)
+    return () => clearTimeout(timer);
+  }, [inFarcaster, autoConnectDone, isConnected, status]);
+
+  // ✅ FIXED: isWalletProperlyConnected as a regular variable (not called inside useEffect)
+  const isWalletProperlyConnected =
+    isConnected &&
+    !!address &&
+    !(inFarcaster && farcasterConnector && typeof farcasterConnector.getChainId !== 'function');
+
+  // Force reconnect if connected but incomplete (desktop Farcaster bug)
   useEffect(() => {
-    if (inFarcaster && isConnected && !isWalletProperlyConnected() && reconnectAttempts < 3) {
-      console.log('🔄 Wallet connected but incomplete, reconnecting...');
-      const timer = setTimeout(() => {
-        disconnect();
-        setAutoConnectDone(false);
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [inFarcaster, isConnected, farcasterConnector, disconnect, reconnectAttempts]);
+    if (
+      !inFarcaster ||
+      !isConnected ||
+      isWalletProperlyConnected ||
+      reconnectAttempts.current >= 3
+    ) return;
+
+    console.warn('⚠️ Wallet connected but incomplete, forcing reconnect...');
+    const timer = setTimeout(() => {
+      disconnect();
+      setAutoConnectDone(false);
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [inFarcaster, isConnected, isWalletProperlyConnected, disconnect]);
 
   const handleManualConnect = async () => {
     if (!farcasterConnector) {
       console.error('❌ Farcaster connector not found');
-      alert('Farcaster connector not found. Please reload the app.');
       return;
     }
-    
-    try {
-      await connect({ connector: farcasterConnector });
-      console.log('✅ Connected to Farcaster wallet');
-    } catch (error) {
-      console.error('❌ Connection error:', error);
-      alert('Failed to connect: ' + (error.message || 'Unknown error'));
-    }
+    reconnectAttempts.current = 0;
+    await attemptConnect();
   };
 
   const handleDisconnect = async () => {
     try {
       await disconnect();
       setAutoConnectDone(false);
-      setReconnectAttempts(0);
-      // ✅ Hanya reload di browser biasa, tidak di Farcaster
+      reconnectAttempts.current = 0;
       if (!inFarcaster) {
         setTimeout(() => window.location.reload(), 100);
       }
@@ -129,7 +142,7 @@ export function FarcasterWalletConnector() {
     }
   };
 
-  // ── Status reconnecting ──
+  // ── Reconnecting ──
   if (status === 'reconnecting') {
     return (
       <div className="flex items-center gap-2 px-3 py-1.5 bg-yellow-500/20 rounded-full">
@@ -139,9 +152,8 @@ export function FarcasterWalletConnector() {
     );
   }
 
-  // ── Sudah connect dan proper ──
-  if (isConnected && address && isWalletProperlyConnected()) {
-    // ✅ Di Farcaster: hanya tampilkan address, tanpa tombol disconnect
+  // ── Connected and healthy ──
+  if (isWalletProperlyConnected) {
     if (inFarcaster) {
       return (
         <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 rounded-full">
@@ -152,8 +164,7 @@ export function FarcasterWalletConnector() {
         </div>
       );
     }
-    
-    // ✅ Di browser biasa: tampilkan address + tombol disconnect
+
     return (
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 rounded-full">
@@ -172,7 +183,7 @@ export function FarcasterWalletConnector() {
     );
   }
 
-  // ── Loading: SDK belum ready atau sedang auto-connect ──
+  // ── Loading / connecting ──
   if (!sdkReady || (inFarcaster && (isPending || status === 'connecting'))) {
     return (
       <div className="flex items-center gap-2 px-4 py-2 bg-purple-500/20 rounded-xl">
@@ -184,7 +195,7 @@ export function FarcasterWalletConnector() {
     );
   }
 
-  // ── Farcaster tapi belum connect (manual fallback) ──
+  // ── Farcaster but not connected — manual fallback ──
   if (inFarcaster && farcasterConnector && !isConnected) {
     return (
       <button
@@ -207,7 +218,7 @@ export function FarcasterWalletConnector() {
     );
   }
 
-  // ── Farcaster tapi connector tidak ketemu ──
+  // ── Farcaster but connector missing ──
   if (inFarcaster && !farcasterConnector) {
     return (
       <div className="px-4 py-2 bg-red-500/20 rounded-xl text-red-300 text-sm">
@@ -220,6 +231,6 @@ export function FarcasterWalletConnector() {
     );
   }
 
-  // ── Browser biasa: RainbowKit ──
+  // ── Browser: RainbowKit ──
   return <ConnectButton />;
 }

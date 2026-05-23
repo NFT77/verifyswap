@@ -340,6 +340,7 @@ export default function SwapWidget({ token, onSuccess }) {
             quoteSource: quote.source,
             selectedRouterAddress: routerAddress,
             selectedDexName: dexName,
+            quoteAmountOut: estimatedOutput,
           }),
         }, 20000);
 

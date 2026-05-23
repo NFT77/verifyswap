@@ -1,10 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAccount } from 'wagmi';
 import TokenIcon from './TokenIcon';
 
-// Popular tokens on Base network
 const POPULAR_TOKENS = {
   ETH: {
     symbol: 'ETH',
@@ -26,7 +25,7 @@ const POPULAR_TOKENS = {
     symbol: 'WBTC',
     name: 'Wrapped Bitcoin',
     address: '0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C',
-    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599/logo.png', // ✅ Fixed WBTC logo URL
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599/logo.png',
     decimals: 8,
     priceUSD: 65000,
   },
@@ -40,50 +39,70 @@ const POPULAR_TOKENS = {
   },
 };
 
-// Skeleton component for loading state
+const BASE_RPC = 'https://mainnet.base.org';
+
+// ✅ FIXED: RPC calls now have timeout — was missing before, causing hangs in Farcaster
+async function rpcCall(body, ms = 8000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(BASE_RPC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return res.json();
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') throw new Error('RPC timeout');
+    throw err;
+  }
+}
+
 const PortfolioSkeleton = () => (
   <div className="bg-gradient-to-br from-slate-800/50 to-slate-900/50 backdrop-blur-xl rounded-2xl border border-white/10 p-4">
     <div className="flex items-center justify-between mb-3">
-      <div className="h-6 w-24 bg-white/10 rounded animate-pulse"></div>
-      <div className="h-5 w-16 bg-white/10 rounded animate-pulse"></div>
+      <div className="h-6 w-24 bg-white/10 rounded animate-pulse" />
+      <div className="h-5 w-16 bg-white/10 rounded animate-pulse" />
     </div>
     <div className="flex items-center justify-between p-3 rounded-xl bg-gradient-to-r from-purple-500/10 to-blue-500/10 mb-3">
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 bg-white/10 rounded-full animate-pulse"></div>
+        <div className="w-10 h-10 bg-white/10 rounded-full animate-pulse" />
         <div>
-          <div className="h-4 w-24 bg-white/10 rounded animate-pulse mb-1"></div>
-          <div className="h-3 w-32 bg-white/10 rounded animate-pulse"></div>
+          <div className="h-4 w-24 bg-white/10 rounded animate-pulse mb-1" />
+          <div className="h-3 w-32 bg-white/10 rounded animate-pulse" />
         </div>
       </div>
-      <div className="h-5 w-20 bg-white/10 rounded animate-pulse"></div>
+      <div className="h-5 w-20 bg-white/10 rounded animate-pulse" />
     </div>
     <div className="space-y-2">
       {[1, 2, 3, 4].map(i => (
         <div key={i} className="flex items-center justify-between p-2">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-white/10 rounded-full animate-pulse"></div>
+            <div className="w-8 h-8 bg-white/10 rounded-full animate-pulse" />
             <div>
-              <div className="h-4 w-16 bg-white/10 rounded animate-pulse mb-1"></div>
-              <div className="h-3 w-24 bg-white/10 rounded animate-pulse"></div>
+              <div className="h-4 w-16 bg-white/10 rounded animate-pulse mb-1" />
+              <div className="h-3 w-24 bg-white/10 rounded animate-pulse" />
             </div>
           </div>
-          <div className="h-4 w-16 bg-white/10 rounded animate-pulse"></div>
+          <div className="h-4 w-16 bg-white/10 rounded animate-pulse" />
         </div>
       ))}
     </div>
   </div>
 );
 
-// Individual token row component
 const TokenRow = ({ token, balance, valueUSD, onTokenClick }) => (
-  <div 
+  <div
     onClick={() => onTokenClick?.(token)}
     className="flex items-center justify-between p-3 rounded-xl hover:bg-white/5 transition-all duration-200 cursor-pointer group"
   >
     <div className="flex items-center gap-3">
       <div className="w-10 h-10 rounded-full overflow-hidden bg-gradient-to-br from-blue-500 to-purple-600 flex-shrink-0">
-        <img 
-          src={token.logo} 
+        <img
+          src={token.logo}
           alt={token.symbol}
           className="w-full h-full object-cover"
           onError={(e) => { e.target.style.display = 'none'; }}
@@ -102,14 +121,13 @@ const TokenRow = ({ token, balance, valueUSD, onTokenClick }) => (
       </div>
       {valueUSD > 0 && (
         <div className="text-xs text-green-400">
-          ≈ ${valueUSD.toLocaleString()}
+          ≈ ${valueUSD.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
         </div>
       )}
     </div>
   </div>
 );
 
-// Main component
 export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, onTokenSelect }) {
   const { address: baseAddress, isConnected: isBaseConnected } = useAccount();
   const [balances, setBalances] = useState({});
@@ -118,6 +136,12 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
   const [totalValue, setTotalValue] = useState(0);
+
+  const isMounted = useRef(true);
+  useEffect(() => {
+    isMounted.current = true;
+    return () => { isMounted.current = false; };
+  }, []);
 
   const copyToClipboard = async (text) => {
     try {
@@ -134,97 +158,94 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
 
-  // Fetch token balances using public RPC
+  // ✅ FIXED: all token balance fetches run in parallel (was sequential before)
   const fetchTokenBalances = useCallback(async (address) => {
     const results = {};
-    
-    // Fetch native ETH balance
-    try {
-      const ethResponse = await fetch('https://mainnet.base.org', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+
+    // Fetch ETH + all ERC-20s in parallel
+    const tokenList = [POPULAR_TOKENS.USDC, POPULAR_TOKENS.WBTC, POPULAR_TOKENS.WETH];
+
+    const [ethResult, ...tokenResults] = await Promise.allSettled([
+      // Native ETH balance
+      rpcCall({
+        jsonrpc: '2.0',
+        method: 'eth_getBalance',
+        params: [address, 'latest'],
+        id: 1,
+      }),
+      // ERC-20 balanceOf calls
+      ...tokenList.map((token) =>
+        rpcCall({
           jsonrpc: '2.0',
-          method: 'eth_getBalance',
-          params: [address, 'latest'],
+          method: 'eth_call',
+          params: [
+            {
+              to: token.address,
+              data: `0x70a08231000000000000000000000000${address.slice(2)}`,
+            },
+            'latest',
+          ],
           id: 1,
-        }),
-      });
-      const ethData = await ethResponse.json();
-      const ethBalance = parseInt(ethData.result, 16) / 1e18;
+        })
+      ),
+    ]);
+
+    // Parse ETH
+    if (ethResult.status === 'fulfilled' && ethResult.value?.result) {
+      const ethBalance = parseInt(ethResult.value.result, 16) / 1e18;
       results.ETH = { balance: ethBalance, priceUSD: 3200, valueUSD: ethBalance * 3200 };
-    } catch (err) {
-      console.error('ETH balance error:', err);
+    } else {
       results.ETH = { balance: 0, priceUSD: 3200, valueUSD: 0 };
     }
 
-    // Fetch popular token balances
-    const tokenList = [POPULAR_TOKENS.USDC, POPULAR_TOKENS.WBTC, POPULAR_TOKENS.WETH];
-    
-    for (const token of tokenList) {
-      try {
-        // Simple ERC-20 balanceOf call via RPC
-        const data = `0x70a08231000000000000000000000000${address.slice(2)}`;
-        const response = await fetch('https://mainnet.base.org', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method: 'eth_call',
-            params: [{ to: token.address, data }, 'latest'],
-            id: 1,
-          }),
-        });
-        const result = await response.json();
-        const balanceRaw = parseInt(result.result, 16);
+    // Parse ERC-20s
+    tokenList.forEach((token, i) => {
+      const res = tokenResults[i];
+      if (res.status === 'fulfilled' && res.value?.result && res.value.result !== '0x') {
+        const balanceRaw = parseInt(res.value.result, 16);
         const balance = balanceRaw / Math.pow(10, token.decimals);
-        
-        // Use price from token object
-        const priceUSD = token.priceUSD || 0;
-        
         results[token.symbol] = {
           balance,
-          priceUSD,
-          valueUSD: balance * priceUSD,
+          priceUSD: token.priceUSD || 0,
+          valueUSD: balance * (token.priceUSD || 0),
         };
-      } catch (err) {
-        console.error(`${token.symbol} balance error:`, err);
-        results[token.symbol] = { balance: 0, priceUSD: 0, valueUSD: 0 };
+      } else {
+        results[token.symbol] = { balance: 0, priceUSD: token.priceUSD || 0, valueUSD: 0 };
       }
-    }
-    
+    });
+
     return results;
   }, []);
 
-  // Load portfolio data
   const loadPortfolio = useCallback(async (isManualRefresh = false) => {
-    if (!baseAddress) return;
-    
+    if (!baseAddress || !isMounted.current) return;
+
     setIsLoading(true);
     if (isManualRefresh) setIsRefreshing(true);
     setError(null);
-    
+
     try {
       const tokenBalances = await fetchTokenBalances(baseAddress);
+      if (!isMounted.current) return;
       setBalances(tokenBalances);
-      
       const total = Object.values(tokenBalances).reduce((sum, t) => sum + (t.valueUSD || 0), 0);
       setTotalValue(total);
     } catch (err) {
+      if (!isMounted.current) return;
       console.error('Portfolio load error:', err);
       setError(err.message);
     } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
+      if (isMounted.current) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [baseAddress, fetchTokenBalances]);
 
-  // Manual refresh handler
   const handleRefresh = useCallback(() => {
     loadPortfolio(true);
   }, [loadPortfolio]);
 
-  // Handle token click to swap
   const handleTokenClick = useCallback((tokenSymbol) => {
     const tokenData = POPULAR_TOKENS[tokenSymbol];
     if (tokenData && onTokenSelect) {
@@ -232,24 +253,19 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
     }
   }, [onTokenSelect]);
 
-  // Load portfolio on mount and when dependencies change
   useEffect(() => {
     if (baseAddress && isBaseConnected) {
       loadPortfolio();
     }
   }, [baseAddress, isBaseConnected, refreshTrigger, loadPortfolio]);
 
-  // Show skeleton on initial load
-  if (isLoading && Object.keys(balances).length === 0) {
-    return <PortfolioSkeleton />;
-  }
+  if (isLoading && Object.keys(balances).length === 0) return <PortfolioSkeleton />;
 
-  // Show error state
   if (error) {
     return (
       <div className="bg-gradient-to-br from-slate-800/50 to-slate-900/50 backdrop-blur-xl rounded-2xl border border-white/10 p-4 text-center">
         <div className="text-red-400 text-sm mb-2">⚠️ Failed to load portfolio</div>
-        <button 
+        <button
           onClick={handleRefresh}
           className="text-xs text-purple-400 hover:text-purple-300 transition"
         >
@@ -259,10 +275,8 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
     );
   }
 
-  // Don't show if not connected
   if (!isBaseConnected || !baseAddress) return null;
 
-  // Token display order
   const tokenOrder = ['ETH', 'USDC', 'WBTC', 'WETH'];
   const displayTokens = tokenOrder.filter(symbol => balances[symbol] && balances[symbol].balance > 0);
 
@@ -277,7 +291,7 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
           <h3 className="text-lg font-semibold text-white">Portfolio</h3>
           {totalValue > 0 && (
             <span className="text-xs bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">
-              ${totalValue.toLocaleString()}
+              ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
           )}
         </div>
@@ -287,18 +301,18 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
           className="p-2 text-gray-400 hover:text-white transition disabled:opacity-50 rounded-lg hover:bg-white/10"
           title="Refresh portfolio"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         </button>
       </div>
-      
+
       {/* Wallet Address Card */}
-      <div 
+      <div
         onClick={() => copyToClipboard(baseAddress)}
         className="relative overflow-hidden rounded-xl mb-4 cursor-pointer group"
       >
-        <div className="absolute inset-0 bg-gradient-to-r from-blue-600/20 to-purple-600/20 rounded-xl blur-3xl group-hover:blur-2xl transition-all duration-500"></div>
+        <div className="absolute inset-0 bg-gradient-to-r from-blue-600/20 to-purple-600/20 rounded-xl blur-3xl group-hover:blur-2xl transition-all duration-500" />
         <div className="relative flex items-center justify-between p-4 rounded-xl bg-gradient-to-r from-blue-500/10 to-purple-500/10 border border-white/10 backdrop-blur-sm">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
@@ -306,9 +320,7 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
             </div>
             <div>
               <div className="font-semibold text-white">Wallet</div>
-              <div className="text-xs text-gray-400 font-mono flex items-center gap-1">
-                {formatAddress(baseAddress)}
-              </div>
+              <div className="text-xs text-gray-400 font-mono">{formatAddress(baseAddress)}</div>
             </div>
           </div>
           <div className="text-right">
@@ -328,12 +340,10 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
         </div>
       </div>
 
-      {/* Loading State */}
       {isRefreshing ? (
-        <div className="text-center py-8 text-gray-400">Refreshing...</div>
+        <div className="text-center py-8 text-gray-400 text-sm">Refreshing...</div>
       ) : (
         <>
-          {/* Total Portfolio Value */}
           {totalValue > 0 && (
             <div className="mb-4 p-3 rounded-xl bg-gradient-to-r from-green-500/10 to-emerald-500/10 border border-green-500/20 text-center">
               <div className="text-xs text-gray-400">Total Portfolio Value</div>
@@ -343,14 +353,12 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
             </div>
           )}
 
-          {/* Token Holdings */}
           <div className="space-y-1">
             <div className="text-xs text-gray-500 px-2 pb-2">Assets</div>
             {displayTokens.map((symbol) => {
               const token = POPULAR_TOKENS[symbol];
               const balance = balances[symbol];
               if (!balance || balance.balance === 0) return null;
-              
               return (
                 <TokenRow
                   key={symbol}

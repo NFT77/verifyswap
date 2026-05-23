@@ -1,83 +1,118 @@
 // app/api/portfolio/route.js
 import { NextResponse } from 'next/server';
 
-// Cache untuk mengurangi panggilan API
-const cache = new Map();
-const CACHE_TTL = 30 * 1000; // 30 detik
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Max-Age': '86400',
+  'Cache-Control': 'no-store',
+};
 
-/**
- * Fetch ERC20 tokens from Blockscout API (Base)
- */
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
+const cache = new Map();
+const CACHE_TTL = 30 * 1000;
+
+// ✅ FIXED: all external fetch calls now use timeout — was missing before
+async function fetchWithTimeout(url, options = {}, ms = 8000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    return res;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') throw new Error(`Timeout: ${url.substring(0, 60)}`);
+    throw err;
+  }
+}
+
 async function fetchBaseTokens(address) {
   try {
-    const response = await fetch(
-      `https://api.blockscout.com/base/api/v2/addresses/${address}/tokens?type=ERC-20`
+    const response = await fetchWithTimeout(
+      `https://api.blockscout.com/base/api/v2/addresses/${address}/tokens?type=ERC-20`,
+      { headers: { 'Accept': 'application/json' } },
+      10000
     );
-    
+
     if (!response.ok) return [];
-    
+
     const data = await response.json();
     const tokenItems = data.items || [];
-    
+
     return tokenItems
       .filter(t => {
-        const balanceNum = parseFloat(t.balance) / Math.pow(10, t.token.decimals);
+        const dec = parseInt(t.token?.decimals) || 18;
+        const balanceNum = parseFloat(t.balance) / Math.pow(10, dec);
         return balanceNum > 0;
       })
-      .map(t => ({
-        address: t.token.contract_address,
-        symbol: t.token.symbol || 'Unknown',
-        name: t.token.name || t.token.symbol || 'Token',
-        balance: (parseFloat(t.balance) / Math.pow(10, t.token.decimals)).toFixed(6),
-        decimals: t.token.decimals,
-        priceUSD: t.token.exchange_rate || 0,
-        valueUSD: ((parseFloat(t.balance) / Math.pow(10, t.token.decimals)) * (t.token.exchange_rate || 0)).toFixed(2),
-        logo: t.token.logo || null,
-      }));
+      .map(t => {
+        const dec = parseInt(t.token?.decimals) || 18;
+        const balance = parseFloat(t.balance) / Math.pow(10, dec);
+        const priceUSD = parseFloat(t.token?.exchange_rate) || 0;
+        return {
+          address: t.token?.contract_address,
+          symbol: t.token?.symbol || 'Unknown',
+          name: t.token?.name || t.token?.symbol || 'Token',
+          balance: balance.toFixed(6),
+          decimals: dec,
+          priceUSD,
+          valueUSD: (balance * priceUSD).toFixed(2),
+          logo: t.token?.icon_url || t.token?.logo || null,
+        };
+      });
   } catch (error) {
-    console.error('Blockscout error:', error);
+    console.error('Blockscout error:', error.message);
     return [];
   }
 }
 
-/**
- * Fetch ETH balance from RPC
- */
-async function fetchBaseBalance(address, rpcUrl = 'https://mainnet.base.org') {
-  try {
-    const response = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'eth_getBalance',
-        params: [address, 'latest'],
-        id: 1,
-      }),
-    });
-    
-    const data = await response.json();
-    const ethBalance = parseInt(data.result, 16) / 1e18;
-    
-    // Fetch real ETH price from CoinGecko
-    let ethPrice = 3200; // fallback
-    try {
-      const priceRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-      const priceData = await priceRes.json();
-      ethPrice = priceData.ethereum?.usd || 3200;
-    } catch (priceError) {
-      console.error('Failed to fetch ETH price:', priceError);
-    }
-    
-    return {
-      formatted: ethBalance.toFixed(4),
-      symbol: 'ETH',
-      value: ethBalance * ethPrice,
-    };
-  } catch (error) {
-    console.error('Base balance error:', error);
-    return { formatted: '0', symbol: 'ETH', value: 0 };
+async function fetchBaseBalance(address) {
+  // Fetch ETH balance and price in parallel
+  const [rpcResult, priceResult] = await Promise.allSettled([
+    fetchWithTimeout(
+      'https://mainnet.base.org',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_getBalance',
+          params: [address, 'latest'],
+          id: 1,
+        }),
+      },
+      8000
+    ),
+    fetchWithTimeout(
+      'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+      { headers: { 'Accept': 'application/json' } },
+      6000
+    ),
+  ]);
+
+  let ethBalance = 0;
+  if (rpcResult.status === 'fulfilled' && rpcResult.value?.ok) {
+    const data = await rpcResult.value.json();
+    ethBalance = parseInt(data.result, 16) / 1e18;
   }
+
+  let ethPrice = 3200;
+  if (priceResult.status === 'fulfilled' && priceResult.value?.ok) {
+    const priceData = await priceResult.value.json();
+    ethPrice = priceData.ethereum?.usd || 3200;
+  }
+
+  return {
+    formatted: ethBalance.toFixed(4),
+    symbol: 'ETH',
+    value: ethBalance * ethPrice,
+    priceUSD: ethPrice,
+  };
 }
 
 export async function GET(request) {
@@ -86,27 +121,28 @@ export async function GET(request) {
   const chain = searchParams.get('chain') || 'base';
 
   if (!address) {
-    return NextResponse.json({ error: 'Address required' }, { status: 400 });
+    return NextResponse.json({ error: 'Address required' }, { status: 400, headers: CORS_HEADERS });
   }
 
-  // Hanya support Base
   if (chain !== 'base') {
     return NextResponse.json(
       { error: `Unsupported chain: ${chain}. Only base is supported` },
-      { status: 400 }
+      { status: 400, headers: CORS_HEADERS }
     );
   }
 
-  // Validate EVM address format
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
-    return NextResponse.json({ error: 'Invalid EVM address format' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Invalid EVM address format' },
+      { status: 400, headers: CORS_HEADERS }
+    );
   }
 
   // Check cache
-  const cacheKey = `base:${address}`;
+  const cacheKey = `base:${address.toLowerCase()}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return NextResponse.json(cached.data);
+    return NextResponse.json(cached.data, { headers: CORS_HEADERS });
   }
 
   try {
@@ -115,8 +151,9 @@ export async function GET(request) {
       fetchBaseTokens(address),
     ]);
 
-    // Calculate total value
-    const totalValue = (nativeBalance?.value || 0) + tokenList.reduce((sum, t) => sum + parseFloat(t.valueUSD || 0), 0);
+    const totalValue =
+      (nativeBalance?.value || 0) +
+      tokenList.reduce((sum, t) => sum + parseFloat(t.valueUSD || 0), 0);
 
     const responseData = {
       address,
@@ -128,16 +165,20 @@ export async function GET(request) {
       timestamp: Date.now(),
     };
 
-    // Cache response
+    // ✅ FIXED: cap cache size to avoid memory leak
+    if (cache.size > 500) {
+      const oldestKey = cache.keys().next().value;
+      cache.delete(oldestKey);
+    }
     cache.set(cacheKey, { data: responseData, timestamp: Date.now() });
 
-    return NextResponse.json(responseData);
+    return NextResponse.json(responseData, { headers: CORS_HEADERS });
 
   } catch (error) {
     console.error('Portfolio error:', error);
     return NextResponse.json(
       { error: 'Failed to fetch portfolio', balance: null, tokens: [] },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
   }
 }

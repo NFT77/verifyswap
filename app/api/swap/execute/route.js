@@ -16,7 +16,6 @@ export async function OPTIONS() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-// Recursively convert BigInt values to strings for JSON serialization
 function serializeBigInt(obj) {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj === 'bigint') return obj.toString();
@@ -51,6 +50,9 @@ export async function POST(request) {
     userAddress,
     selectedRouterAddress,
     selectedDexName,
+    // ✅ NEW: receive the quoted output amount from client so we can pass it
+    // to executeDirectSwap for correct amountOutMinimum calculation
+    quoteAmountOut,
   } = body;
 
   if (!chain || !tokenOut || !amount) {
@@ -92,6 +94,7 @@ export async function POST(request) {
     console.log(`💰 SWAP EXECUTION on BASE`);
     console.log(`💰 Amount: ${amountNum} | After fee: ${amountAfterFee} | Fee: ${feeAmount}`);
     console.log(`💰 User: ${userAddress} | Token out: ${tokenOut}`);
+    console.log(`💰 Quote amount out: ${quoteAmountOut}`);
 
     // --- Priority 1: OKX DEX Aggregator ---
     let result = null;
@@ -121,7 +124,7 @@ export async function POST(request) {
             feeRecipient: result.feeRecipient || feeRecipient,
             quote: {
               amountIn: amountAfterFee,
-              amountOut: result.transaction?.toTokenAmount || 'unknown',
+              amountOut: result.toTokenAmount || 'unknown',
               feeAmount,
               feeRecipient,
             },
@@ -141,6 +144,9 @@ export async function POST(request) {
 
     try {
       const deadline = Math.floor(Date.now() / 1000) + 1200;
+
+      // ✅ FIXED: pass quoteAmountOut so executeDirectSwap can calculate
+      // amountOutMinimum correctly for tokens with non-18 decimals (e.g. USDC = 6)
       const directResult = await Promise.race([
         executeDirectSwap({
           tokenIn: tokenIn === 'ETH' ? 'ETH' : tokenIn,
@@ -150,6 +156,7 @@ export async function POST(request) {
           recipient: userAddress,
           deadline,
           routerAddress: selectedRouterAddress,
+          quoteAmountOut: quoteAmountOut ? parseFloat(quoteAmountOut) : undefined,
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Uniswap timeout (15s)')), 15000)),
       ]);
@@ -176,9 +183,8 @@ export async function POST(request) {
         );
       }
 
-      if (directResult?.error) {
-        throw new Error(directResult.error);
-      }
+      if (directResult?.error) throw new Error(directResult.error);
+
     } catch (uniswapError) {
       console.error('Uniswap swap failed:', uniswapError.message);
       return NextResponse.json(

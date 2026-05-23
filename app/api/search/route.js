@@ -8,11 +8,22 @@ import { checkTokenSecurity } from '@/lib/api/goplus';
 
 const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
 
-// ✅ Cache TTL diperpanjang — kurangi API calls berulang
 const tokenCache = new Map();
-const CACHE_TTL = 30 * 1000; // 30 detik
+const CACHE_TTL = 30 * 1000;
 
-// ✅ Helper: fetch dengan timeout agar tidak hang di Mini App
+// ✅ FIXED CORS: added Authorization header, removed s-maxage (caused issues in Farcaster iframe)
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Max-Age': '86400',
+  'Cache-Control': 'no-store',
+};
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -22,22 +33,23 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
     return res;
   } catch (err) {
     clearTimeout(timer);
-    if (err.name === 'AbortError') {
-      throw new Error(`Timeout after ${timeoutMs}ms: ${url}`);
-    }
+    if (err.name === 'AbortError') throw new Error(`Timeout after ${timeoutMs}ms`);
     throw err;
   }
 }
 
 function getCachedToken(address) {
   const cached = tokenCache.get(address.toLowerCase());
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data;
+  tokenCache.delete(address.toLowerCase());
   return null;
 }
 
 function setCachedToken(address, data) {
+  if (tokenCache.size > 200) {
+    const oldestKey = tokenCache.keys().next().value;
+    tokenCache.delete(oldestKey);
+  }
   tokenCache.set(address.toLowerCase(), { data, timestamp: Date.now() });
 }
 
@@ -54,7 +66,6 @@ function mapUser(user) {
   };
 }
 
-// ✅ DexScreener dengan timeout
 async function getDexScreenerData(address, chain) {
   try {
     const res = await fetchWithTimeout(
@@ -82,7 +93,6 @@ async function getDexScreenerData(address, chain) {
   }
 }
 
-// ✅ Multi-source logo dengan timeout per source
 async function getTokenLogoFromMultipleSources(tokenAddress, chain, symbol) {
   const sources = [
     { name: 'CoinGecko', fn: () => searchTokenOnCoinGecko(tokenAddress, chain) },
@@ -92,7 +102,6 @@ async function getTokenLogoFromMultipleSources(tokenAddress, chain, symbol) {
 
   for (const source of sources) {
     try {
-      // ✅ Timeout 6 detik per source
       const result = await Promise.race([
         source.fn(),
         new Promise((_, reject) =>
@@ -110,7 +119,6 @@ async function getTokenLogoFromMultipleSources(tokenAddress, chain, symbol) {
   return null;
 }
 
-// ✅ Security check dengan timeout
 async function getSecurityData(address, chain) {
   const result = {
     isHoneypot: false,
@@ -127,23 +135,17 @@ async function getSecurityData(address, chain) {
 
   if (chain !== 'base') return result;
 
-  // GoPlus + Etherscan parallel dengan timeout
   const [goplusResult, etherscanResult] = await Promise.allSettled([
     Promise.race([
       checkTokenSecurity(address, chain),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('GoPlus timeout')), 7000)
-      ),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('GoPlus timeout')), 7000)),
     ]),
     Promise.race([
       verifyTokenContract(address),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Etherscan timeout')), 7000)
-      ),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Etherscan timeout')), 7000)),
     ]),
   ]);
 
-  // ✅ GoPlus result
   if (goplusResult.status === 'fulfilled' && goplusResult.value) {
     const g = goplusResult.value;
     result.isHoneypot = g.isHoneypot || false;
@@ -160,7 +162,6 @@ async function getSecurityData(address, chain) {
     result.riskFactors.push('Security check unavailable');
   }
 
-  // ✅ Etherscan result
   if (etherscanResult.status === 'fulfilled' && etherscanResult.value) {
     result.isVerified = etherscanResult.value.isVerified || false;
     if (!result.isVerified) {
@@ -214,7 +215,6 @@ async function getFarcasterProfile(query, byFid = false) {
     );
 
     if (!res.ok) {
-      // Fallback ke search jika by_username gagal
       if (!byFid) {
         const clean = query.replace('@', '');
         const searchRes = await fetchWithTimeout(
@@ -264,18 +264,6 @@ function buildTrustResponse(profile) {
   };
 }
 
-// ✅ Response headers untuk Mini App Farcaster (CORS)
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Cache-Control': 'public, s-maxage=30',
-};
-
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: CORS_HEADERS });
-}
-
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
@@ -291,7 +279,6 @@ export async function GET(request) {
   const trimmed = query.trim();
 
   try {
-    // ── Token address ──────────────────────────────────────────────────────
     const isEVMAddress = /^0x[a-fA-F0-9]{40}$/i.test(trimmed);
     const isSolanaAddress = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/i.test(trimmed);
 
@@ -301,13 +288,11 @@ export async function GET(request) {
         return NextResponse.json(cached, { headers: CORS_HEADERS });
       }
 
-      // ✅ DexScreener + Logo parallel (tidak tunggu security dulu)
       const [dexData, logoData] = await Promise.all([
         getDexScreenerData(trimmed, chain),
         getTokenLogoFromMultipleSources(trimmed, chain, null),
       ]);
 
-      // ✅ Security check parallel setelah data dasar siap
       const security = await getSecurityData(trimmed, chain);
 
       const tokenData = {
@@ -315,6 +300,8 @@ export async function GET(request) {
         symbol: logoData?.symbol || dexData?.symbol || 'Unknown',
         name: logoData?.name || dexData?.name || 'Unknown Token',
         logo: logoData?.logo || null,
+        // ✅ Pass decimals through so SwapWidget uses correct precision
+        decimals: logoData?.decimals || 18,
         chain,
         priceUSD: dexData?.priceUSD || logoData?.priceUSD || 0,
         liquidityUSD: dexData?.liquidityUSD || 0,
@@ -333,7 +320,6 @@ export async function GET(request) {
       return NextResponse.json(response, { headers: CORS_HEADERS });
     }
 
-    // ── FID (angka) ────────────────────────────────────────────────────────
     if (/^\d+$/.test(trimmed) && trimmed.length <= 10) {
       const profile = await getFarcasterProfile(trimmed, true);
       if (profile?.fid) {
@@ -345,7 +331,6 @@ export async function GET(request) {
       );
     }
 
-    // ── Username ───────────────────────────────────────────────────────────
     const cleanUsername = trimmed.replace('@', '');
     if (cleanUsername.length > 0 && cleanUsername.length <= 50) {
       const profile = await getFarcasterProfile(cleanUsername, false);
@@ -354,7 +339,6 @@ export async function GET(request) {
       }
     }
 
-    // ── Tidak ditemukan ────────────────────────────────────────────────────
     return NextResponse.json(
       { notFound: true, query: trimmed, message: `No results for "${trimmed}"` },
       { headers: CORS_HEADERS }
