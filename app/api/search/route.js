@@ -92,8 +92,6 @@ async function getDexScreenerData(address, chain) {
   }
 }
 
-// ✅ FIXED: was sequential (CoinGecko → CMC → Moralis one by one = up to 18s total).
-// Now runs all three in parallel and picks the best result.
 async function getTokenLogoFromMultipleSources(tokenAddress, chain) {
   const withTimeout = (fn, name) =>
     Promise.race([
@@ -112,7 +110,6 @@ async function getTokenLogoFromMultipleSources(tokenAddress, chain) {
     withTimeout(() => getTokenMetadataMoralis(tokenAddress, chain), 'Moralis'),
   ]);
 
-  // Merge: prefer CoinGecko for logo/price, Moralis for decimals
   const best = geckoResult || cmcResult || moralisResult;
   if (!best) return null;
 
@@ -202,51 +199,102 @@ function calculateTrustScore(security, token) {
   return 25;
 }
 
-async function getFarcasterProfile(query, byFid = false) {
-  if (!NEYNAR_API_KEY) {
-    console.error('NEYNAR_API_KEY not set');
-    return null;
-  }
-
+// ============ FARCASTER USERNAME LOOKUP YANG ROBUST UNTUK MINI APP ============
+async function getFarcasterProfileRobust(username, viewerFid = null) {
+  if (!NEYNAR_API_KEY) return null;
+  
+  const cleanUsername = username.replace('@', '').toLowerCase();
+  
+  // Strategy 1: Exact match via /user/by_username
   try {
-    let url;
-    if (byFid) {
-      url = `https://api.neynar.com/v2/farcaster/user/bulk?fids=${query}`;
-    } else {
-      const clean = query.replace('@', '');
-      url = `https://api.neynar.com/v2/farcaster/user/by_username?username=${clean}`;
-    }
-
+    const url = `https://api.neynar.com/v2/farcaster/user/by_username?username=${cleanUsername}`;
     const res = await fetchWithTimeout(
       url,
       { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
       8000
     );
-
-    if (!res.ok) {
-      if (!byFid) {
-        const clean = query.replace('@', '');
-        const searchRes = await fetchWithTimeout(
-          `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(clean)}&limit=1`,
-          { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
-          8000
-        );
-        if (searchRes.ok) {
-          const d = await searchRes.json();
-          const user = d?.result?.users?.[0];
-          return user ? mapUser(user) : null;
-        }
+    if (res.ok) {
+      const data = await res.json();
+      if (data.user) return mapUser(data.user);
+    }
+  } catch (err) {
+    console.log('by_username error:', err.message);
+  }
+  
+  // Strategy 2: Search dengan viewer_fid (jika tersedia)
+  try {
+    let searchUrl = `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(cleanUsername)}&limit=10`;
+    if (viewerFid) {
+      searchUrl += `&viewer_fid=${viewerFid}`;
+    }
+    
+    const searchRes = await fetchWithTimeout(
+      searchUrl,
+      { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
+      8000
+    );
+    
+    if (searchRes.ok) {
+      const data = await searchRes.json();
+      const users = data.result?.users || [];
+      
+      // Cari exact match (case insensitive)
+      let user = users.find(u => u.username?.toLowerCase() === cleanUsername);
+      
+      // Jika tidak ada exact match, ambil yang follower terbanyak
+      if (!user && users.length > 0) {
+        user = users.sort((a, b) => (b.follower_count || 0) - (a.follower_count || 0))[0];
       }
+      
+      if (user) return mapUser(user);
+    }
+  } catch (err) {
+    console.log('search error:', err.message);
+  }
+  
+  // Strategy 3: Bulk lookup by username (fallback tambahan)
+  try {
+    const bulkUrl = `https://api.neynar.com/v2/farcaster/user/bulk?usernames=${cleanUsername}`;
+    const bulkRes = await fetchWithTimeout(
+      bulkUrl,
+      { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
+      8000
+    );
+    if (bulkRes.ok) {
+      const bulkData = await bulkRes.json();
+      const users = bulkData.users || [];
+      if (users.length > 0) return mapUser(users[0]);
+    }
+  } catch (err) {
+    console.log('bulk lookup error:', err.message);
+  }
+  
+  return null;
+}
+
+// Legacy function untuk kompatibilitas (panggil yang robust)
+async function getFarcasterProfile(query, byFid = false) {
+  if (byFid) {
+    if (!NEYNAR_API_KEY) return null;
+    try {
+      const url = `https://api.neynar.com/v2/farcaster/user/bulk?fids=${query}`;
+      const res = await fetchWithTimeout(
+        url,
+        { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
+        8000
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      const user = data?.users?.[0];
+      return user ? mapUser(user) : null;
+    } catch (err) {
+      console.error('Farcaster profile error (FID):', err.message);
       return null;
     }
-
-    const data = await res.json();
-    const user = byFid ? data?.users?.[0] : data?.user;
-    return user ? mapUser(user) : null;
-  } catch (err) {
-    console.error('Farcaster profile error:', err.message);
-    return null;
   }
+  
+  // Untuk username, panggil fungsi robust
+  return getFarcasterProfileRobust(query);
 }
 
 function buildTrustResponse(profile) {
@@ -297,7 +345,6 @@ export async function GET(request) {
         return NextResponse.json(cached, { headers: CORS_HEADERS });
       }
 
-      // ✅ Run dex data, logo sources, and security all in parallel
       const [dexData, logoData, security] = await Promise.all([
         getDexScreenerData(trimmed, chain),
         getTokenLogoFromMultipleSources(trimmed, chain),
@@ -328,6 +375,7 @@ export async function GET(request) {
       return NextResponse.json(response, { headers: CORS_HEADERS });
     }
 
+    // Cek FID (angka)
     if (/^\d+$/.test(trimmed) && trimmed.length <= 10) {
       const profile = await getFarcasterProfile(trimmed, true);
       if (profile?.fid) {
@@ -339,10 +387,23 @@ export async function GET(request) {
       );
     }
 
+    // ========== CEK USERNAME (dengan multiple fallback strategies) ==========
     const cleanUsername = trimmed.replace('@', '');
     if (cleanUsername.length > 0 && cleanUsername.length <= 50) {
-      const profile = await getFarcasterProfile(cleanUsername, false);
-      if (profile?.fid) {
+      // Coba dengan viewer_fid = null dulu
+      let profile = await getFarcasterProfileRobust(cleanUsername);
+      
+      // Jika gagal, coba dengan viewer_fid = 3 (FID warpcaster)
+      if (!profile) {
+        profile = await getFarcasterProfileRobust(cleanUsername, 3);
+      }
+      
+      // Jika tetap gagal, coba dengan viewer_fid = 2
+      if (!profile) {
+        profile = await getFarcasterProfileRobust(cleanUsername, 2);
+      }
+      
+      if (profile && profile.fid) {
         return NextResponse.json(buildTrustResponse(profile), { headers: CORS_HEADERS });
       }
     }
