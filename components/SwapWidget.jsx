@@ -31,8 +31,7 @@ const UNISWAP_V3_ROUTER = '0x2626664c2603336E57B271c5C0b26F421741e481';
 const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
 
 export default function SwapWidget({ token, onSuccess }) {
-  // Base/EVM wallet
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, status } = useAccount();
   const { writeContractAsync } = useWriteContract();
   
   const [amount, setAmount] = useState('');
@@ -43,6 +42,7 @@ export default function SwapWidget({ token, onSuccess }) {
   const [txHash, setTxHash] = useState(null);
   const [swapDirection, setSwapDirection] = useState('buy');
   const [isExecuting, setIsExecuting] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   
   // State untuk route selection
   const [selectedRoute, setSelectedRoute] = useState(null);
@@ -131,7 +131,30 @@ export default function SwapWidget({ token, onSuccess }) {
     }
   }, [quote]);
 
-  // Handle swap on Base
+  // Fungsi untuk mendapatkan pesan error yang user-friendly
+  const getUserFriendlyErrorMessage = (err) => {
+    const errorMessage = err.message?.toLowerCase() || '';
+    const shortMessage = err.shortMessage?.toLowerCase() || '';
+    
+    if (errorMessage.includes('slippage') || shortMessage.includes('slippage')) {
+      return 'Transaction failed due to price slippage. Try increasing slippage tolerance (1-3%) or wait for less volatility.';
+    }
+    if (errorMessage.includes('insufficient') || shortMessage.includes('insufficient')) {
+      return 'Insufficient balance. You don\'t have enough tokens to complete this swap.';
+    }
+    if (errorMessage.includes('user rejected') || shortMessage.includes('user rejected')) {
+      return 'Transaction was rejected. You can try again.';
+    }
+    if (errorMessage.includes('network') || errorMessage.includes('connection')) {
+      return 'Network connection issue. Please check your internet and try again.';
+    }
+    if (errorMessage.includes('execution reverted') || shortMessage.includes('execution reverted')) {
+      return 'Transaction failed. Common causes:\n• Slippage too low (try 1-3%)\n• Token liquidity issues\n• Try a smaller amount';
+    }
+    return `Swap failed: ${err.shortMessage || err.message || 'Unknown error'}`;
+  };
+
+  // Handle swap on Base dengan retry logic
   const handleBaseSwap = useCallback(async () => {
     if (!quote || !token) return;
     
@@ -139,83 +162,115 @@ export default function SwapWidget({ token, onSuccess }) {
       alert('Please connect your wallet first to swap');
       return;
     }
+
+    // Cek status koneksi wallet
+    if (status === 'disconnected') {
+      alert('Wallet disconnected. Please refresh the page and reconnect.');
+      return;
+    }
     
     setIsExecuting(true);
-    try {
-      const amountIn = parseFloat(amount);
-      const amountInWei = BigInt(Math.floor(amountIn * 1e18));
-      
-      const activeRoute = selectedRoute;
-      const amountOutValue = activeRoute?.receiveAmount || quote.amountOut;
-      const amountOutMin = BigInt(Math.floor(amountOutValue * (1 - slippage / 100) * 1e18));
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
-      
-      const tokenInAddress = swapDirection === 'buy' ? WETH_ADDRESS : token.address;
-      const tokenOutAddress = swapDirection === 'buy' ? token.address : WETH_ADDRESS;
-      const fee = 3000;
-      
-      const routerAddress = selectedRouterAddress || UNISWAP_V3_ROUTER;
-      const dexName = activeRoute?.dexName || 'Uniswap V3';
-      
-      console.log(`🔄 Executing swap on: ${dexName} (${routerAddress})`);
-      
-      const executeResponse = await fetch('/api/swap/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chain: 'base',
-          tokenIn: swapDirection === 'buy' ? 'ETH' : token.address,
-          tokenOut: swapDirection === 'buy' ? token.address : 'ETH',
-          amount: amountIn,
-          slippage: slippage,
-          userAddress: address,
-          rawQuote: quote.rawQuote,
-          quoteSource: quote.source,
-          selectedRouterAddress: routerAddress,
-          selectedDexName: dexName,
-        }),
-      });
-      
-      const result = await executeResponse.json();
-      
-      if (!result.success) {
-        throw new Error(result.error || 'Swap failed');
-      }
-      
-      if (result.transaction) {
-        const swapParams = {
-          tokenIn: tokenInAddress,
-          tokenOut: tokenOutAddress,
-          fee: fee,
-          recipient: address,
-          deadline: deadline,
-          amountIn: amountInWei,
-          amountOutMinimum: amountOutMin,
-          sqrtPriceLimitX96: 0,
-        };
+    setRetryCount(0);
+    
+    const executeSwap = async (retry = false) => {
+      try {
+        const amountIn = parseFloat(amount);
+        const amountInWei = BigInt(Math.floor(amountIn * 1e18));
         
-        const hash = await writeContractAsync({
-          address: routerAddress,
-          abi: UNISWAP_ROUTER_ABI,
-          functionName: 'exactInputSingle',
-          args: [swapParams],
-          value: swapDirection === 'buy' ? amountInWei : BigInt(0),
+        // Gunakan slippage lebih tinggi untuk retry
+        const effectiveSlippage = retry ? Math.min(slippage + 1, 5) : slippage;
+        const activeRoute = selectedRoute;
+        const amountOutValue = activeRoute?.receiveAmount || quote.amountOut;
+        const amountOutMin = BigInt(Math.floor(amountOutValue * (1 - effectiveSlippage / 100) * 1e18));
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+        
+        const tokenInAddress = swapDirection === 'buy' ? WETH_ADDRESS : token.address;
+        const tokenOutAddress = swapDirection === 'buy' ? token.address : WETH_ADDRESS;
+        const fee = 3000;
+        
+        const routerAddress = selectedRouterAddress || UNISWAP_V3_ROUTER;
+        const dexName = activeRoute?.dexName || 'Uniswap V3';
+        
+        console.log(`🔄 Executing swap on: ${dexName} (${routerAddress})`);
+        if (retry) console.log(`⚠️ Retry attempt with ${effectiveSlippage}% slippage`);
+        
+        const executeResponse = await fetch('/api/swap/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chain: 'base',
+            tokenIn: swapDirection === 'buy' ? 'ETH' : token.address,
+            tokenOut: swapDirection === 'buy' ? token.address : 'ETH',
+            amount: amountIn,
+            slippage: effectiveSlippage,
+            userAddress: address,
+            rawQuote: quote.rawQuote,
+            quoteSource: quote.source,
+            selectedRouterAddress: routerAddress,
+            selectedDexName: dexName,
+          }),
         });
         
-        setTxHash(hash);
-        alert(`✅ Swap successful on ${dexName}! Tx: ${hash.slice(0, 10)}...`);
-      } else {
-        alert(result.message || 'Swap successful!');
+        const result = await executeResponse.json();
+        
+        if (!result.success) {
+          throw new Error(result.error || 'Swap failed');
+        }
+        
+        if (result.transaction) {
+          const swapParams = {
+            tokenIn: tokenInAddress,
+            tokenOut: tokenOutAddress,
+            fee: fee,
+            recipient: address,
+            deadline: deadline,
+            amountIn: amountInWei,
+            amountOutMinimum: amountOutMin,
+            sqrtPriceLimitX96: 0,
+          };
+          
+          const hash = await writeContractAsync({
+            address: routerAddress,
+            abi: UNISWAP_ROUTER_ABI,
+            functionName: 'exactInputSingle',
+            args: [swapParams],
+            value: swapDirection === 'buy' ? amountInWei : BigInt(0),
+          });
+          
+          setTxHash(hash);
+          alert(`✅ Swap successful on ${dexName}! Tx: ${hash.slice(0, 10)}...`);
+          onSuccess?.();
+        } else {
+          alert(result.message || 'Swap successful!');
+          onSuccess?.();
+        }
+        
+      } catch (err) {
+        console.error('Swap error:', err);
+        
+        // Retry logic untuk execution reverted
+        const errorMessage = err.message?.toLowerCase() || '';
+        const needsRetry = errorMessage.includes('execution reverted') || 
+                          errorMessage.includes('slippage') ||
+                          errorMessage.includes('price');
+        
+        if (needsRetry && retryCount < 2) {
+          setRetryCount(prev => prev + 1);
+          const userConfirmed = confirm(`Transaction failed due to price movement. Retry with ${Math.min(slippage + (retryCount + 1), 5)}% slippage?`);
+          if (userConfirmed) {
+            await executeSwap(true);
+            return;
+          }
+        }
+        
+        const userMessage = getUserFriendlyErrorMessage(err);
+        alert(userMessage);
       }
-      
-      onSuccess?.();
-    } catch (err) {
-      console.error('Base swap error:', err);
-      alert('Swap failed: ' + (err.shortMessage || err.message));
-    } finally {
-      setIsExecuting(false);
-    }
-  }, [quote, token, address, amount, slippage, swapDirection, selectedRoute, selectedRouterAddress, onSuccess, writeContractAsync]);
+    };
+    
+    await executeSwap(false);
+    setIsExecuting(false);
+  }, [quote, token, address, amount, slippage, swapDirection, selectedRoute, selectedRouterAddress, onSuccess, writeContractAsync, status, retryCount]);
 
   if (!token) return null;
 
@@ -273,6 +328,11 @@ export default function SwapWidget({ token, onSuccess }) {
           {selectedRoute && (
             <span className="text-xs bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">
               ⚡ Route: {selectedRoute.dexName}
+            </span>
+          )}
+          {status === 'reconnecting' && (
+            <span className="text-xs bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full animate-pulse">
+              🔄 Reconnecting wallet...
             </span>
           )}
         </div>
@@ -530,25 +590,28 @@ export default function SwapWidget({ token, onSuccess }) {
       {/* Swap Button */}
       <button
         onClick={handleBaseSwap}
-        disabled={isButtonDisabled}
+        disabled={isButtonDisabled || status === 'reconnecting'}
         className={`w-full py-4 rounded-xl font-semibold transition ${
-          !isButtonDisabled
+          !isButtonDisabled && status !== 'reconnecting'
             ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:opacity-90'
             : 'bg-white/10 text-gray-400 cursor-not-allowed'
         }`}
       >
-        {!isConnected && amount && parseFloat(amount) > 0 && hasQuote
-          ? `Connect Wallet to ${swapDirection === 'buy' ? 'Buy' : 'Sell'}`
-          : !amount || parseFloat(amount) <= 0
-            ? 'Enter an amount'
-            : !hasQuote && !isGettingQuote
-              ? 'Failed to get quote'
-              : isGettingQuote
-                ? 'Getting quote...'
-                : isExecuting
-                  ? 'Swapping...'
-                  : `${swapDirection === 'buy' ? 'Buy' : 'Sell'} ${amount || '0'} ${payToken.symbol} → ${receiveToken.symbol}`
-        }
+        {status === 'reconnecting' ? (
+          '🔄 Reconnecting wallet...'
+        ) : !isConnected && amount && parseFloat(amount) > 0 && hasQuote ? (
+          `Connect Wallet to ${swapDirection === 'buy' ? 'Buy' : 'Sell'}`
+        ) : !amount || parseFloat(amount) <= 0 ? (
+          'Enter an amount'
+        ) : !hasQuote && !isGettingQuote ? (
+          'Failed to get quote'
+        ) : isGettingQuote ? (
+          'Getting quote...'
+        ) : isExecuting ? (
+          'Swapping...'
+        ) : (
+          `${swapDirection === 'buy' ? 'Buy' : 'Sell'} ${amount || '0'} ${payToken.symbol} → ${receiveToken.symbol}`
+        )}
       </button>
 
       {/* Footer */}
