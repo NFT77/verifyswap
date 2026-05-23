@@ -9,89 +9,66 @@ import { farcasterFrame } from '@farcaster/miniapp-wagmi-connector';
 import { wagmiConfig } from '@/lib/wagmi';
 import '@rainbow-me/rainbowkit/styles.css';
 
+// Create a stable QueryClient outside component to avoid recreation
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      // ✅ Hindari retry berlebihan di HP
-      retry: 1,
-      staleTime: 30000,
+      retry: 2,
+      staleTime: 30_000,
     },
   },
 });
 
-// ✅ Konfigurasi khusus untuk Farcaster Mini App dengan RPC yang lebih reliable
+// Farcaster config — stable reference outside component
 const farcasterConfig = createConfig({
   chains: [base],
   transports: {
-    [base.id]: http('https://base.llamarpc.com', {
-      // ✅ Gunakan RPC alternatif yang lebih stabil
-      batch: true,
-      fetchOptions: {
-        timeout: 30000,
-      },
-    }),
+    [base.id]: http('https://mainnet.base.org'),
   },
   connectors: [farcasterFrame()],
-  // ✅ Penting untuk WebView HP
-  syncConnectedChain: true,
 });
 
 export function Providers({ children }) {
   const [mounted, setMounted] = useState(false);
   const [inFarcaster, setInFarcaster] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
       try {
-        // ✅ Cek apakah di Farcaster environment
-        const isFarcasterEnv = typeof window !== 'undefined' && 
-          (window.parent !== window || 
-           navigator.userAgent.includes('Farcaster') ||
-           document.referrer.includes('farcaster'));
-        
-        if (isFarcasterEnv) {
-          // ✅ Coba load SDK hanya jika di Farcaster
-          try {
-            const { sdk } = await import('@farcaster/miniapp-sdk');
-            const context = await sdk.context;
-            if (context?.user?.fid) {
-              setInFarcaster(true);
-              await sdk.actions.ready();
-              console.log('✅ Farcaster Mini App ready, FID:', context.user.fid);
-            } else {
-              setInFarcaster(true); // Tetap anggap di Farcaster meski context belum ready
-            }
-          } catch (sdkError) {
-            console.log('SDK not available, but still in Farcaster mode:', sdkError);
-            setInFarcaster(true); // Tetap pakai mode Farcaster
-          }
+        // Check if we're inside a Farcaster frame/mini app
+        const { sdk } = await import('@farcaster/miniapp-sdk');
+
+        // Use a short timeout so we don't hang if SDK fails to respond
+        const contextPromise = Promise.race([
+          sdk.context,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('SDK timeout')), 3000)),
+        ]);
+
+        const context = await contextPromise;
+
+        if (!cancelled && context?.user?.fid) {
+          setInFarcaster(true);
+          // Signal to Farcaster that the mini app is ready to display
+          await sdk.actions.ready({ disableNativeGestures: false });
+          console.log('✅ Farcaster Mini App ready, FID:', context.user.fid);
         }
       } catch (error) {
-        console.log('Not in Farcaster environment:', error);
-        setInFarcaster(false);
+        // Not in Farcaster or SDK unavailable — silently fall through to browser mode
+        console.log('Browser mode (not in Farcaster):', error?.message || error);
       } finally {
-        setMounted(true);
-        setIsLoading(false);
+        if (!cancelled) setMounted(true);
       }
     };
 
     init();
+    return () => { cancelled = true; };
   }, []);
 
-  // ✅ Tampilkan loading state sementara
-  if (!mounted || isLoading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900/20 to-slate-900 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-400">Loading VerifySwap...</p>
-        </div>
-      </div>
-    );
-  }
+  // Avoid hydration mismatch — render nothing until client is ready
+  if (!mounted) return null;
 
-  // === FARCASTER MODE ===
   if (inFarcaster) {
     return (
       <WagmiProvider config={farcasterConfig}>
@@ -102,7 +79,6 @@ export function Providers({ children }) {
     );
   }
 
-  // === BROWSER MODE ===
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>

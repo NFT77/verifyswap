@@ -1,13 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useAccount, useWriteContract } from 'wagmi';
 import TokenIcon from './TokenIcon';
 
-// FEE RECIPIENT ADDRESS
 const FEE_RECIPIENT_BASE = '0x462be091Ef7Cfae820bb032a3cf2729fcAaD6e47';
 
-// Uniswap V3 Router ABI
 const UNISWAP_ROUTER_ABI = [{
   type: 'function',
   name: 'exactInputSingle',
@@ -30,7 +28,6 @@ const UNISWAP_ROUTER_ABI = [{
 const UNISWAP_V3_ROUTER = '0x2626664c2603336E57B271c5C0b26F421741e481';
 const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
 
-// ============ TOKEN LIST ON BASE NETWORK ============
 const POPULAR_TOKENS = {
   ETH: {
     symbol: 'ETH',
@@ -66,21 +63,38 @@ const POPULAR_TOKENS = {
   },
 };
 
+// Safe fetch with timeout — always creates a fresh AbortController (Farcaster-safe)
+async function fetchWithTimeout(url, options = {}, ms = 12000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timed out. Please check your connection.');
+    }
+    throw error;
+  }
+}
+
+// Convert float amount to BigInt based on token decimals
+function toTokenBigInt(amount, decimals) {
+  const factor = Math.pow(10, decimals);
+  return BigInt(Math.floor(amount * factor));
+}
+
 export default function SwapWidget({ token, onSuccess }) {
   const { address, isConnected, status } = useAccount();
-  const { writeContractAsync, data: hash, isPending: isWritePending } = useWriteContract();
-  
-  // ✅ PERBAIKAN: Wait for transaction receipt untuk feedback lebih baik
-  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
-    hash,
-  });
-  
-  // State untuk token yang dipilih
+  const { writeContractAsync } = useWriteContract();
+
   const [payToken, setPayToken] = useState(POPULAR_TOKENS.ETH);
   const [receiveToken, setReceiveToken] = useState(POPULAR_TOKENS.USDC);
   const [isTokenSelectorOpen, setIsTokenSelectorOpen] = useState(false);
   const [selectorMode, setSelectorMode] = useState('pay');
-  
+
   const [amount, setAmount] = useState('');
   const [isLoadingQuote, setIsLoadingQuote] = useState(false);
   const [quote, setQuote] = useState(null);
@@ -88,28 +102,19 @@ export default function SwapWidget({ token, onSuccess }) {
   const [isCustomSlippage, setIsCustomSlippage] = useState(false);
   const [txHash, setTxHash] = useState(null);
   const [isExecuting, setIsExecuting] = useState(false);
-  
+
   const [swapError, setSwapError] = useState('');
   const [swapSuccess, setSwapSuccess] = useState('');
   const [showRetry, setShowRetry] = useState(false);
   const [retrySlippage, setRetrySlippage] = useState(0);
   const [pendingExecuteSwap, setPendingExecuteSwap] = useState(null);
-  
+
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [selectedRouterAddress, setSelectedRouterAddress] = useState(null);
-  
-  // ✅ PERBAIKAN: Ref untuk tracking status mount
-  const isMounted = useRef(true);
-  
-  useEffect(() => {
-    return () => {
-      isMounted.current = false;
-    };
-  }, []);
 
-  // Update receive token when token prop changes (dari search result)
+  // Update receive token when token prop changes
   useEffect(() => {
-    if (token && token.address && isMounted.current) {
+    if (token && token.address) {
       const foundToken = Object.values(POPULAR_TOKENS).find(
         t => t.address === token.address || t.symbol === token.symbol
       );
@@ -128,35 +133,9 @@ export default function SwapWidget({ token, onSuccess }) {
     }
   }, [token]);
 
-  // ✅ PERBAIKAN: Handle transaction confirmation
-  useEffect(() => {
-    if (isConfirmed && hash) {
-      setTxHash(hash);
-      setSwapSuccess(`✅ Swap successful! Tx: ${hash.slice(0, 10)}...`);
-      setIsExecuting(false);
-      onSuccess?.();
-    }
-  }, [isConfirmed, hash, onSuccess]);
-
-  const fetchWithTimeout = useCallback(async (url, options = {}, ms = 15000) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), ms);
-    try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      clearTimeout(timeoutId);
-      return response;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (error.name === 'AbortError') {
-        throw new Error('Request timed out. Please check your connection.');
-      }
-      throw error;
-    }
-  }, []);
-
   useEffect(() => {
     if (swapSuccess) {
-      const timer = setTimeout(() => setSwapSuccess(''), 8000);
+      const timer = setTimeout(() => setSwapSuccess(''), 5000);
       return () => clearTimeout(timer);
     }
   }, [swapSuccess]);
@@ -174,57 +153,66 @@ export default function SwapWidget({ token, onSuccess }) {
 
   const slippageOptions = useMemo(() => [0.1, 0.5, 1, 3, 5], []);
 
-  // GET QUOTE
+  // Fetch quote
   useEffect(() => {
+    let cancelled = false;
+
     async function fetchQuote() {
       if (!amount || parseFloat(amount) <= 0 || !payToken || !receiveToken) {
         setQuote(null);
         return;
       }
-      
+
       setIsLoadingQuote(true);
       setSwapError('');
-      
+
       try {
         const tokenIn = payToken.address === 'ETH' ? 'ETH' : payToken.address;
         const tokenOut = receiveToken.address === 'ETH' ? 'ETH' : receiveToken.address;
-        
+
         const res = await fetchWithTimeout(
           `/api/swap/quote?chain=base&tokenIn=${tokenIn}&tokenOut=${tokenOut}&amount=${amount}&slippage=${slippage}`,
           {},
-          10000
+          12000
         );
+
+        if (!res.ok) {
+          throw new Error(`Quote API error: ${res.status}`);
+        }
+
         const data = await res.json();
-        
+
+        if (cancelled) return;
+
         if (data.error) {
-          console.error('Quote API error:', data.error);
           setQuote(null);
+          setSwapError(data.error);
         } else {
           setQuote(data);
         }
       } catch (err) {
-        console.error('Quote error:', err);
+        if (cancelled) return;
         if (err.message?.includes('timed out')) {
-          setSwapError('Quote request timed out. Please try again.');
+          setSwapError('Quote timed out. Please try again.');
         } else {
           setSwapError(err.message || 'Failed to get quote');
         }
         setQuote(null);
       } finally {
-        if (isMounted.current) {
-          setIsLoadingQuote(false);
-        }
+        if (!cancelled) setIsLoadingQuote(false);
       }
     }
-    
-    const timeout = setTimeout(fetchQuote, 500);
-    return () => clearTimeout(timeout);
-  }, [amount, payToken, receiveToken, slippage, fetchWithTimeout]);
+
+    const timeout = setTimeout(fetchQuote, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [amount, payToken, receiveToken, slippage]);
 
   const handleSwitchTokens = useCallback(() => {
-    const temp = payToken;
     setPayToken(receiveToken);
-    setReceiveToken(temp);
+    setReceiveToken(payToken);
     setAmount('');
     setQuote(null);
     setTxHash(null);
@@ -234,23 +222,19 @@ export default function SwapWidget({ token, onSuccess }) {
     setSwapSuccess('');
   }, [payToken, receiveToken]);
 
-  const handleSelectToken = (selectedToken, mode) => {
+  const handleSelectToken = useCallback((selectedToken, mode) => {
     if (mode === 'pay') {
-      if (selectedToken.address === receiveToken.address) {
-        setReceiveToken(payToken);
-      }
+      if (selectedToken.address === receiveToken.address) setReceiveToken(payToken);
       setPayToken(selectedToken);
     } else {
-      if (selectedToken.address === payToken.address) {
-        setPayToken(receiveToken);
-      }
+      if (selectedToken.address === payToken.address) setPayToken(receiveToken);
       setReceiveToken(selectedToken);
     }
     setIsTokenSelectorOpen(false);
     setAmount('');
     setQuote(null);
     setSwapError('');
-  };
+  }, [payToken, receiveToken]);
 
   const handleCustomSlippage = useCallback((value) => {
     const parsed = parseFloat(value);
@@ -266,81 +250,82 @@ export default function SwapWidget({ token, onSuccess }) {
   }, []);
 
   const getUserFriendlyErrorMessage = useCallback((err) => {
-    const errorMessage = err.message?.toLowerCase() || '';
-    const shortMessage = err.shortMessage?.toLowerCase() || '';
-    
-    if (errorMessage.includes('execution reverted') || shortMessage.includes('execution reverted')) {
+    const msg = (err.message || '').toLowerCase();
+    const short = (err.shortMessage || '').toLowerCase();
+
+    if (msg.includes('execution reverted') || short.includes('execution reverted')) {
       return (
         '❌ Transaction Failed\n\n' +
         'Possible reasons:\n' +
         '• Token has insufficient liquidity\n' +
-        '• Try adding USDC to your Warpcast wallet\n' +
         '• Increase slippage tolerance to 2-3%\n' +
         '• Try a smaller amount\n\n' +
         '🔧 Solutions:\n' +
-        '• Refresh the page and reconnect wallet\n' +
-        '• Make sure you have enough ETH for gas'
+        '• Desktop: Switch wallet → back to Warplet → refresh\n' +
+        '• Android: Minimize app, find Warplet modal behind'
       );
     }
-    
-    if (errorMessage.includes('slippage') || shortMessage.includes('slippage')) {
-      return '❌ Price moved too fast. Try increasing slippage tolerance to 2-3%';
+    if (msg.includes('slippage') || short.includes('slippage')) {
+      return '❌ Price moved too fast. Try increasing slippage to 2-3%';
     }
-    
-    if (errorMessage.includes('insufficient') || shortMessage.includes('insufficient')) {
-      return '❌ Insufficient balance. Make sure you have enough tokens for the swap.';
+    if (msg.includes('insufficient') || short.includes('insufficient')) {
+      return '❌ Insufficient balance for this swap.';
     }
-    
-    if (errorMessage.includes('user rejected') || shortMessage.includes('user rejected')) {
+    if (msg.includes('user rejected') || short.includes('user rejected')) {
       return '❌ Transaction rejected. You can try again.';
     }
-    
-    if (errorMessage.includes('timed out') || errorMessage.includes('timeout')) {
+    if (msg.includes('timed out') || msg.includes('timeout')) {
       return 'Request timed out. Please check your connection and try again.';
     }
-    
     return `❌ Transaction failed: ${err.shortMessage || err.message || 'Unknown error'}`;
   }, []);
 
-  // ✅ PERBAIKAN: Handle swap dengan lebih robust untuk HP
   const handleBaseSwap = useCallback(async () => {
     if (!quote || !payToken || !receiveToken) return;
-    
+
     if (!address) {
       setSwapError('Please connect your wallet first to swap');
       return;
     }
-
     if (status === 'disconnected') {
-      setSwapError('Wallet disconnected. Please refresh the page and reconnect.');
+      setSwapError('Wallet disconnected. Please refresh and reconnect.');
       return;
     }
-    
+
     setIsExecuting(true);
     setSwapError('');
     setSwapSuccess('');
-    
+
     const executeSwap = async (retry = false, retrySlippageValue = null) => {
       try {
         const amountIn = parseFloat(amount);
-        const amountInWei = BigInt(Math.floor(amountIn * 1e18));
-        
-        const effectiveSlippage = retry ? retrySlippageValue || Math.min(slippage + 1, 5) : slippage;
+
+        // Use correct decimals for payToken (ETH = 18)
+        const payDecimals = payToken.address === 'ETH' ? 18 : (payToken.decimals || 18);
+        const amountInWei = toTokenBigInt(amountIn, payDecimals);
+
+        const effectiveSlippage = retry ? (retrySlippageValue || Math.min(slippage + 1, 5)) : slippage;
         const activeRoute = selectedRoute;
         const amountOutValue = activeRoute?.receiveAmount || quote.amountOut;
-        const amountOutMin = BigInt(Math.floor(amountOutValue * (1 - effectiveSlippage / 100) * 1e18));
+
+        // Use correct decimals for receiveToken
+        const receiveDecimals = receiveToken.address === 'ETH' ? 18 : (receiveToken.decimals || 18);
+        const amountOutMin = toTokenBigInt(
+          amountOutValue * (1 - effectiveSlippage / 100),
+          receiveDecimals
+        );
+
         const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
-        
         const tokenInAddress = payToken.address === 'ETH' ? WETH_ADDRESS : payToken.address;
         const tokenOutAddress = receiveToken.address === 'ETH' ? WETH_ADDRESS : receiveToken.address;
         const fee = 3000;
-        
         const routerAddress = selectedRouterAddress || UNISWAP_V3_ROUTER;
         const dexName = activeRoute?.dexName || 'Uniswap V3';
-        
-        console.log(`🔄 Executing swap: ${payToken.symbol} → ${receiveToken.symbol} on ${dexName}`);
-        
-        // ✅ PERBAIKAN: Panggil API execute dengan timeout lebih panjang
+
+        console.log(`🔄 Swap: ${payToken.symbol} → ${receiveToken.symbol} on ${dexName}`);
+        console.log(`   amountIn: ${amountInWei} (${payDecimals} dec)`);
+        console.log(`   amountOutMin: ${amountOutMin} (${receiveDecimals} dec), slippage: ${effectiveSlippage}%`);
+
         const executeResponse = await fetchWithTimeout('/api/swap/execute', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -357,15 +342,19 @@ export default function SwapWidget({ token, onSuccess }) {
             selectedDexName: dexName,
           }),
         }, 20000);
-        
+
+        if (!executeResponse.ok) {
+          const errData = await executeResponse.json().catch(() => ({}));
+          throw new Error(errData.error || `Execute API error: ${executeResponse.status}`);
+        }
+
         const result = await executeResponse.json();
-        
+
         if (!result.success) {
           throw new Error(result.error || 'Swap failed');
         }
-        
-        if (result.transaction && result.needsOnChain) {
-          // ✅ PERBAIKAN: Gunakan writeContractAsync dengan error handling lebih baik
+
+        if (result.transaction) {
           const swapParams = {
             tokenIn: tokenInAddress,
             tokenOut: tokenOutAddress,
@@ -374,63 +363,57 @@ export default function SwapWidget({ token, onSuccess }) {
             deadline: deadline,
             amountIn: amountInWei,
             amountOutMinimum: amountOutMin,
-            sqrtPriceLimitX96: 0,
+            sqrtPriceLimitX96: BigInt(0),
           };
-          
-          try {
-            const txHash = await writeContractAsync({
-              address: routerAddress,
-              abi: UNISWAP_ROUTER_ABI,
-              functionName: 'exactInputSingle',
-              args: [swapParams],
-              value: payToken.address === 'ETH' ? amountInWei : BigInt(0),
-            });
-            console.log('Transaction sent:', txHash);
-            // Transaction akan di-handle oleh useWaitForTransactionReceipt
-          } catch (writeError) {
-            console.error('Write contract error:', writeError);
-            throw writeError;
-          }
-        } else if (result.success && !result.needsOnChain) {
+
+          const hash = await writeContractAsync({
+            address: routerAddress,
+            abi: UNISWAP_ROUTER_ABI,
+            functionName: 'exactInputSingle',
+            args: [swapParams],
+            value: payToken.address === 'ETH' ? amountInWei : BigInt(0),
+          });
+
+          setTxHash(hash);
+          setSwapSuccess(`✅ Swap sent! ${amountIn} ${payToken.symbol} → ${receiveToken.symbol}`);
+          onSuccess?.();
+        } else {
           setSwapSuccess(result.message || 'Swap successful!');
-          setIsExecuting(false);
           onSuccess?.();
         }
-        
+
       } catch (err) {
         console.error('Swap error:', err);
-        
-        const errorMessage = err.message?.toLowerCase() || '';
-        const needsRetry = errorMessage.includes('execution reverted') || 
-                          errorMessage.includes('slippage') ||
-                          errorMessage.includes('price');
-        
-        if (needsRetry && !showRetry && isMounted.current) {
+
+        const errMsg = (err.message || '').toLowerCase();
+        const needsRetry = errMsg.includes('execution reverted') ||
+                           errMsg.includes('slippage') ||
+                           errMsg.includes('price');
+
+        if (needsRetry && !showRetry) {
           const newSlippage = Math.min(slippage + 1, 5);
           setRetrySlippage(newSlippage);
           setShowRetry(true);
           setPendingExecuteSwap(() => async () => {
             await executeSwap(true, newSlippage);
           });
-          setIsExecuting(false);
           return;
         }
-        
-        const userMessage = getUserFriendlyErrorMessage(err);
-        setSwapError(userMessage);
-        setIsExecuting(false);
+
+        setSwapError(getUserFriendlyErrorMessage(err));
       }
     };
-    
+
     await executeSwap(false);
-    // Jangan set isExecuting false di sini karena akan di-set oleh transaction confirmation atau error
-  }, [quote, payToken, receiveToken, address, amount, slippage, selectedRoute, selectedRouterAddress, onSuccess, writeContractAsync, status, showRetry, getUserFriendlyErrorMessage, fetchWithTimeout]);
+    setIsExecuting(false);
+  }, [quote, payToken, receiveToken, address, amount, slippage, selectedRoute, selectedRouterAddress, onSuccess, writeContractAsync, status, showRetry, getUserFriendlyErrorMessage]);
 
   const handleRetry = useCallback(async () => {
     setShowRetry(false);
     if (pendingExecuteSwap) {
       setIsExecuting(true);
       await pendingExecuteSwap();
+      setIsExecuting(false);
       setPendingExecuteSwap(null);
     }
   }, [pendingExecuteSwap]);
@@ -447,50 +430,38 @@ export default function SwapWidget({ token, onSuccess }) {
   const estimatedOutput = quote?.amountOut || 0;
   const isGettingQuote = isLoadingQuote;
   const hasQuote = !!quote && !quote.error;
-  
+
   const rate = amountNum > 0 && estimatedOutput > 0 ? estimatedOutput / amountNum : 0;
   const minimumReceived = estimatedOutput * (1 - slippage / 100);
   const priceImpact = quote?.priceImpact || 0;
   const swapFee = amountNum * 0.003;
-  
+
   const payValueUSD = amountNum * (payToken.priceUSD || 0);
   const receiveValueUSD = estimatedOutput * (receiveToken.priceUSD || 0);
 
-  const isButtonDisabled = !amountNum || amountNum <= 0 || !hasQuote || isExecuting || isWritePending || isConfirming || !isConnected;
+  const isButtonDisabled = !amountNum || amountNum <= 0 || !hasQuote || isExecuting || !isConnected;
 
-  const getButtonText = () => {
-    if (status === 'reconnecting') return '🔄 Reconnecting wallet...';
-    if (!isConnected && amountNum > 0 && hasQuote) return 'Connect Wallet to Swap';
-    if (!amountNum || amountNum <= 0) return 'Enter an amount';
-    if (!hasQuote && !isGettingQuote) return 'Failed to get quote';
-    if (isGettingQuote) return 'Getting quote...';
-    if (isWritePending) return 'Approve in wallet...';
-    if (isConfirming) return 'Confirming transaction...';
-    if (isExecuting) return 'Swapping...';
-    return `Swap ${amountNum} ${payToken.symbol} → ${receiveToken.symbol}`;
-  };
-
-  const getSlippageWarning = useCallback(() => {
-    if (slippage >= 5) {
-      return { text: '⚠️ VERY HIGH SLIPPAGE! Only use for extremely volatile tokens.', color: 'text-red-400 bg-red-500/10 border-red-500/20' };
-    }
-    if (slippage >= 3) {
-      return { text: '⚠️ High slippage. Consider a lower value.', color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20' };
-    }
-    if (slippage <= 0.3) {
-      return { text: '✅ Low slippage is safe, but may fail in volatile markets.', color: 'text-green-400 bg-green-500/10 border-green-500/20' };
-    }
+  const getSlippageWarning = () => {
+    if (slippage >= 5) return { text: '⚠️ VERY HIGH SLIPPAGE! Only use for extremely volatile tokens.', color: 'text-red-400 bg-red-500/10 border-red-500/20' };
+    if (slippage >= 3) return { text: '⚠️ High slippage. Consider a lower value.', color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20' };
+    if (slippage <= 0.3) return { text: '✅ Low slippage is safe, but may fail in volatile markets.', color: 'text-green-400 bg-green-500/10 border-green-500/20' };
     return null;
-  }, [slippage]);
+  };
 
   const slippageWarning = getSlippageWarning();
 
+  // Token Selector Modal — plain conditional render, no portal needed
   const TokenSelector = () => (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[9999] flex items-center justify-center p-4">
       <div className="bg-slate-800 rounded-2xl w-full max-w-md max-h-[80vh] overflow-hidden">
-        <div className="p-4 border-b border-white/10 flex justify-between items-center sticky top-0 bg-slate-800">
+        <div className="p-4 border-b border-white/10 flex justify-between items-center bg-slate-800 sticky top-0">
           <h3 className="text-lg font-semibold text-white">Select a token</h3>
-          <button onClick={() => setIsTokenSelectorOpen(false)} className="text-gray-400 hover:text-white text-xl p-2 touch-manipulation">✕</button>
+          <button
+            onClick={() => setIsTokenSelectorOpen(false)}
+            className="text-gray-400 hover:text-white text-xl w-8 h-8 flex items-center justify-center"
+          >
+            ✕
+          </button>
         </div>
         <div className="p-2 max-h-[60vh] overflow-y-auto">
           <div className="text-xs text-gray-500 px-3 py-2">Popular</div>
@@ -499,10 +470,15 @@ export default function SwapWidget({ token, onSuccess }) {
               key={t.symbol}
               onClick={() => handleSelectToken(t, selectorMode)}
               disabled={isExecuting}
-              className="w-full flex items-center gap-3 p-3 hover:bg-white/10 active:bg-white/20 rounded-xl transition disabled:opacity-50 touch-manipulation"
+              className="w-full flex items-center gap-3 p-3 hover:bg-white/10 rounded-xl transition disabled:opacity-50"
             >
               <div className="w-10 h-10 rounded-full overflow-hidden bg-gradient-to-br from-blue-500 to-purple-600 flex-shrink-0">
-                <img src={t.logo} alt={t.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} />
+                <img
+                  src={t.logo}
+                  alt={t.symbol}
+                  className="w-full h-full object-cover"
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
               </div>
               <div className="flex-1 text-left">
                 <div className="font-medium text-white">{t.symbol}</div>
@@ -525,23 +501,13 @@ export default function SwapWidget({ token, onSuccess }) {
       {swapError && (
         <div className="mb-3 p-3 bg-red-500/20 border border-red-500/30 rounded-xl">
           <p className="text-red-400 text-sm whitespace-pre-line">{swapError}</p>
-          <button onClick={() => setSwapError('')} className="text-xs text-red-300 mt-1 underline touch-manipulation">Dismiss</button>
+          <button onClick={() => setSwapError('')} className="text-xs text-red-300 mt-1 underline">Dismiss</button>
         </div>
       )}
 
       {swapSuccess && (
         <div className="mb-3 p-3 bg-green-500/20 border border-green-500/30 rounded-xl">
-          <p className="text-green-400 text-sm break-all">✅ {swapSuccess}</p>
-          {txHash && (
-            <a 
-              href={`https://basescan.org/tx/${txHash}`} 
-              target="_blank" 
-              rel="noopener noreferrer" 
-              className="text-green-300 text-xs font-mono break-all hover:underline block mt-1"
-            >
-              View on Basescan
-            </a>
-          )}
+          <p className="text-green-400 text-sm">{swapSuccess}</p>
         </div>
       )}
 
@@ -549,8 +515,8 @@ export default function SwapWidget({ token, onSuccess }) {
         <div className="mb-3 p-3 bg-yellow-500/20 border border-yellow-500/30 rounded-xl">
           <p className="text-yellow-400 text-sm mb-2">⚠️ Price moved. Retry with {retrySlippage}% slippage?</p>
           <div className="flex gap-2">
-            <button onClick={handleRetry} className="px-3 py-1 bg-yellow-500 text-black rounded-lg text-sm font-medium touch-manipulation">Retry</button>
-            <button onClick={handleCancelRetry} className="px-3 py-1 bg-white/10 text-white rounded-lg text-sm touch-manipulation">Cancel</button>
+            <button onClick={handleRetry} className="px-3 py-1 bg-yellow-500 text-black rounded-lg text-sm font-medium">Retry</button>
+            <button onClick={handleCancelRetry} className="px-3 py-1 bg-white/10 text-white rounded-lg text-sm">Cancel</button>
           </div>
         </div>
       )}
@@ -558,24 +524,37 @@ export default function SwapWidget({ token, onSuccess }) {
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="text-sm font-medium text-white">Swap</div>
-        {selectedRoute && <span className="text-xs bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">⚡ {selectedRoute.dexName}</span>}
-        {status === 'reconnecting' && <span className="text-xs bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full animate-pulse">🔄 Reconnecting...</span>}
+        <div className="flex items-center gap-2">
+          {selectedRoute && (
+            <span className="text-xs bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">⚡ {selectedRoute.dexName}</span>
+          )}
+          {status === 'reconnecting' && (
+            <span className="text-xs bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full animate-pulse">🔄 Reconnecting...</span>
+          )}
+        </div>
       </div>
 
-      {/* You Pay - FIXED MOBILE LAYOUT */}
+      {/* You Pay */}
       <div className="p-3 rounded-xl bg-black/30 mb-2">
         <div className="flex justify-between items-center mb-2">
           <span className="text-sm text-gray-400">You pay</span>
           <span className="text-xs text-gray-500">Balance: --</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button 
-            onClick={() => { setSelectorMode('pay'); setIsTokenSelectorOpen(true); }} 
-            disabled={isExecuting} 
-            className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 active:bg-white/30 transition disabled:opacity-50 flex-shrink-0 touch-manipulation"
+          <button
+            onClick={() => { setSelectorMode('pay'); setIsTokenSelectorOpen(true); }}
+            disabled={isExecuting}
+            className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 transition disabled:opacity-50 flex-shrink-0"
           >
             <div className="w-6 h-6 rounded-full overflow-hidden flex-shrink-0">
-              <img src={payToken.logo} alt={payToken.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} />
+              {payToken.logo && (
+                <img
+                  src={payToken.logo}
+                  alt={payToken.symbol}
+                  className="w-full h-full object-cover"
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+              )}
             </div>
             <span className="font-medium text-white">{payToken.symbol}</span>
             <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -583,13 +562,12 @@ export default function SwapWidget({ token, onSuccess }) {
             </svg>
           </button>
           <div className="flex-1 min-w-[100px]">
-            <input 
-              type="number" 
-              inputMode="decimal"
-              value={amount} 
-              onChange={(e) => setAmount(e.target.value)} 
-              placeholder="0.0" 
-              disabled={isExecuting} 
+            <input
+              type="number"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0.0"
+              disabled={isExecuting}
               className="w-full bg-transparent text-xl text-white text-right outline-none disabled:opacity-50"
             />
           </div>
@@ -599,7 +577,13 @@ export default function SwapWidget({ token, onSuccess }) {
 
       {/* Switch Button */}
       <div className="flex justify-center -my-2 relative z-10">
-        <button onClick={handleSwitchTokens} disabled={isExecuting} className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center text-white text-sm hover:bg-purple-500 transition disabled:opacity-50 touch-manipulation">↓↑</button>
+        <button
+          onClick={handleSwitchTokens}
+          disabled={isExecuting}
+          className="w-7 h-7 bg-purple-600 rounded-full flex items-center justify-center text-white text-xs hover:bg-purple-500 transition disabled:opacity-50"
+        >
+          ↓↑
+        </button>
       </div>
 
       {/* You Receive */}
@@ -608,13 +592,20 @@ export default function SwapWidget({ token, onSuccess }) {
           <span className="text-sm text-gray-400">You receive (estimated)</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button 
-            onClick={() => { setSelectorMode('receive'); setIsTokenSelectorOpen(true); }} 
-            disabled={isExecuting} 
-            className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 active:bg-white/30 transition disabled:opacity-50 flex-shrink-0 touch-manipulation"
+          <button
+            onClick={() => { setSelectorMode('receive'); setIsTokenSelectorOpen(true); }}
+            disabled={isExecuting}
+            className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 transition disabled:opacity-50 flex-shrink-0"
           >
             <div className="w-6 h-6 rounded-full overflow-hidden flex-shrink-0">
-              <img src={receiveToken.logo} alt={receiveToken.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} />
+              {receiveToken.logo && (
+                <img
+                  src={receiveToken.logo}
+                  alt={receiveToken.symbol}
+                  className="w-full h-full object-cover"
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+              )}
             </div>
             <span className="font-medium text-white">{receiveToken.symbol}</span>
             <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -623,14 +614,16 @@ export default function SwapWidget({ token, onSuccess }) {
           </button>
           <div className="flex-1 text-right">
             <div className="text-xl text-white font-mono">
-              {isGettingQuote ? <span className="text-gray-400 text-sm animate-pulse">...</span> : estimatedOutput.toFixed(6)}
+              {isGettingQuote
+                ? <span className="text-gray-400 text-sm animate-pulse">...</span>
+                : estimatedOutput.toFixed(6)}
             </div>
             <div className="text-xs text-green-400 mt-1">≈ ${receiveValueUSD.toFixed(2)}</div>
           </div>
         </div>
       </div>
 
-      {/* DETAIL SWAP INFO */}
+      {/* Swap Detail Info */}
       {hasQuote && amountNum > 0 && !isGettingQuote && (
         <div className="mb-3 p-3 rounded-xl bg-black/30 border border-white/10">
           <div className="space-y-2 text-sm">
@@ -640,11 +633,13 @@ export default function SwapWidget({ token, onSuccess }) {
             </div>
             <div className="flex justify-between items-center">
               <span className="text-gray-400">Min. Received</span>
-              <span className="text-white">{minimumReceived.toFixed(6)} {receiveToken.symbol} <span className="text-gray-500 text-xs">(slippage {slippage}%)</span></span>
+              <span className="text-white">{minimumReceived.toFixed(6)} {receiveToken.symbol} <span className="text-gray-500 text-xs">({slippage}%)</span></span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-gray-400">Price Impact</span>
-              <span className={priceImpact > 5 ? 'text-red-400' : priceImpact > 2 ? 'text-yellow-400' : 'text-green-400'}>{priceImpact.toFixed(2)}%</span>
+              <span className={priceImpact > 5 ? 'text-red-400' : priceImpact > 2 ? 'text-yellow-400' : 'text-green-400'}>
+                {priceImpact.toFixed(2)}%
+              </span>
             </div>
             <div className="flex justify-between items-center pt-2 border-t border-white/10">
               <span className="text-gray-400">Swap Fee (0.3%)</span>
@@ -654,19 +649,46 @@ export default function SwapWidget({ token, onSuccess }) {
         </div>
       )}
 
-      {/* SLIPPAGE SECTION */}
+      {/* Slippage */}
       <div className="mb-3">
         <div className="flex justify-between items-center mb-2">
           <span className="text-sm font-medium text-white">Slippage Tolerance</span>
-          <span className={`text-xs ${slippage > 3 ? 'text-red-400' : slippage > 1 ? 'text-yellow-400' : 'text-green-400'}`}>{slippage}%</span>
+          <span className={`text-xs ${slippage > 3 ? 'text-red-400' : slippage > 1 ? 'text-yellow-400' : 'text-green-400'}`}>
+            {slippage}%
+          </span>
         </div>
         <div className="flex gap-2 flex-wrap">
           {slippageOptions.map((s) => (
-            <button key={s} onClick={() => handlePresetSlippage(s)} disabled={isExecuting} className={`px-3 py-1.5 rounded-lg text-sm transition touch-manipulation ${slippage === s && !isCustomSlippage ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/20'} disabled:opacity-50`}>{s}%</button>
+            <button
+              key={s}
+              onClick={() => handlePresetSlippage(s)}
+              disabled={isExecuting}
+              className={`px-3 py-1.5 rounded-lg text-sm transition ${
+                slippage === s && !isCustomSlippage
+                  ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white'
+                  : 'bg-white/10 text-gray-300 hover:bg-white/20'
+              } disabled:opacity-50`}
+            >
+              {s}%
+            </button>
           ))}
-          <input type="number" step="0.1" min="0" max="50" value={isCustomSlippage ? slippage : ''} onChange={(e) => handleCustomSlippage(e.target.value)} placeholder="Custom" disabled={isExecuting} className="w-20 px-2 py-1.5 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center outline-none focus:border-purple-500 disabled:opacity-50" />
+          <input
+            type="number"
+            step="0.1"
+            min="0"
+            max="50"
+            value={isCustomSlippage ? slippage : ''}
+            onChange={(e) => handleCustomSlippage(e.target.value)}
+            placeholder="Custom"
+            disabled={isExecuting}
+            className="w-20 px-2 py-1.5 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center outline-none focus:border-purple-500 disabled:opacity-50"
+          />
         </div>
-        {slippageWarning && <div className={`mt-2 p-2 rounded-lg text-xs ${slippageWarning.color}`}>{slippageWarning.text}</div>}
+        {slippageWarning && (
+          <div className={`mt-2 p-2 rounded-lg text-xs border ${slippageWarning.color}`}>
+            {slippageWarning.text}
+          </div>
+        )}
       </div>
 
       {/* Warning */}
@@ -680,30 +702,59 @@ export default function SwapWidget({ token, onSuccess }) {
         </div>
       )}
 
-      {(isGettingQuote || isExecuting || isWritePending || isConfirming) && (
+      {txHash && (
+        <div className="mb-3 p-2 bg-green-500/20 rounded-lg text-center">
+          <p className="text-green-400 text-xs">Transaction sent!</p>
+          <a
+            href={`https://basescan.org/tx/${txHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-green-300 text-xs font-mono break-all hover:underline"
+          >
+            {txHash.slice(0, 10)}...{txHash.slice(-8)}
+          </a>
+        </div>
+      )}
+
+      {(isGettingQuote || isExecuting) && (
         <div className="mb-3 p-2 bg-blue-500/20 rounded-lg text-center">
           <div className="flex items-center justify-center gap-2">
             <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
             <p className="text-blue-400 text-xs">
-              {isGettingQuote ? 'Getting best price...' : 
-               isWritePending ? 'Confirm in wallet...' :
-               isConfirming ? 'Confirming on blockchain...' :
-               'Executing swap...'}
+              {isGettingQuote ? 'Getting best price...' : 'Executing swap...'}
             </p>
           </div>
         </div>
       )}
 
       {/* Swap Button */}
-      <button 
-        onClick={handleBaseSwap} 
-        disabled={isButtonDisabled || status === 'reconnecting'} 
-        className={`w-full py-4 rounded-xl font-semibold transition touch-manipulation ${!isButtonDisabled && status !== 'reconnecting' ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:opacity-90 active:scale-[0.98]' : 'bg-white/10 text-gray-400 cursor-not-allowed'}`}
+      <button
+        onClick={handleBaseSwap}
+        disabled={isButtonDisabled || status === 'reconnecting'}
+        className={`w-full py-4 rounded-xl font-semibold transition ${
+          !isButtonDisabled && status !== 'reconnecting'
+            ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:opacity-90 active:scale-[0.98]'
+            : 'bg-white/10 text-gray-400 cursor-not-allowed'
+        }`}
       >
-        {getButtonText()}
+        {status === 'reconnecting'
+          ? '🔄 Reconnecting wallet...'
+          : !isConnected && amountNum > 0 && hasQuote
+          ? 'Connect Wallet to Swap'
+          : !amountNum || amountNum <= 0
+          ? 'Enter an amount'
+          : !hasQuote && !isGettingQuote
+          ? 'Failed to get quote'
+          : isGettingQuote
+          ? 'Getting quote...'
+          : isExecuting
+          ? 'Swapping...'
+          : `Swap ${amountNum} ${payToken.symbol} → ${receiveToken.symbol}`}
       </button>
 
-      <div className="text-center text-xs text-gray-500 mt-3">🔒 Non-custodial | 🛡️ 0.3% fee | ⚡ Uniswap V3 on Base</div>
+      <div className="text-center text-xs text-gray-500 mt-3">
+        🔒 Non-custodial | 🛡️ 0.3% fee | ⚡ Uniswap V3 on Base
+      </div>
     </div>
   );
 }
