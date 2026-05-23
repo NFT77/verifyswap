@@ -11,7 +11,6 @@ const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
 const tokenCache = new Map();
 const CACHE_TTL = 30 * 1000;
 
-// ✅ FIXED CORS: added Authorization header, removed s-maxage (caused issues in Farcaster iframe)
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
@@ -93,30 +92,40 @@ async function getDexScreenerData(address, chain) {
   }
 }
 
-async function getTokenLogoFromMultipleSources(tokenAddress, chain, symbol) {
-  const sources = [
-    { name: 'CoinGecko', fn: () => searchTokenOnCoinGecko(tokenAddress, chain) },
-    { name: 'CoinMarketCap', fn: () => searchTokenOnCMC(tokenAddress, chain) },
-    { name: 'Moralis', fn: () => getTokenMetadataMoralis(tokenAddress, chain) },
-  ];
+// ✅ FIXED: was sequential (CoinGecko → CMC → Moralis one by one = up to 18s total).
+// Now runs all three in parallel and picks the best result.
+async function getTokenLogoFromMultipleSources(tokenAddress, chain) {
+  const withTimeout = (fn, name) =>
+    Promise.race([
+      fn(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`${name} timeout`)), 6000)
+      ),
+    ]).catch(err => {
+      console.error(`${name} error:`, err.message);
+      return null;
+    });
 
-  for (const source of sources) {
-    try {
-      const result = await Promise.race([
-        source.fn(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`${source.name} timeout`)), 6000)
-        ),
-      ]);
-      if (result?.logo || result?.symbol || result?.name) {
-        console.log(`Data found via ${source.name}`);
-        return result;
-      }
-    } catch (err) {
-      console.error(`${source.name} error:`, err.message);
-    }
-  }
-  return null;
+  const [geckoResult, cmcResult, moralisResult] = await Promise.all([
+    withTimeout(() => searchTokenOnCoinGecko(tokenAddress, chain), 'CoinGecko'),
+    withTimeout(() => searchTokenOnCMC(tokenAddress, chain), 'CoinMarketCap'),
+    withTimeout(() => getTokenMetadataMoralis(tokenAddress, chain), 'Moralis'),
+  ]);
+
+  // Merge: prefer CoinGecko for logo/price, Moralis for decimals
+  const best = geckoResult || cmcResult || moralisResult;
+  if (!best) return null;
+
+  return {
+    logo: geckoResult?.logo || cmcResult?.logo || moralisResult?.logo || null,
+    symbol: geckoResult?.symbol || cmcResult?.symbol || moralisResult?.symbol || null,
+    name: geckoResult?.name || cmcResult?.name || moralisResult?.name || null,
+    decimals: moralisResult?.decimals || geckoResult?.decimals || 18,
+    priceUSD: geckoResult?.priceUSD || 0,
+    volume24h: geckoResult?.volume24h || 0,
+    priceChange24h: geckoResult?.priceChange24h || 0,
+    marketCap: geckoResult?.marketCap || 0,
+  };
 }
 
 async function getSecurityData(address, chain) {
@@ -288,19 +297,18 @@ export async function GET(request) {
         return NextResponse.json(cached, { headers: CORS_HEADERS });
       }
 
-      const [dexData, logoData] = await Promise.all([
+      // ✅ Run dex data, logo sources, and security all in parallel
+      const [dexData, logoData, security] = await Promise.all([
         getDexScreenerData(trimmed, chain),
-        getTokenLogoFromMultipleSources(trimmed, chain, null),
+        getTokenLogoFromMultipleSources(trimmed, chain),
+        getSecurityData(trimmed, chain),
       ]);
-
-      const security = await getSecurityData(trimmed, chain);
 
       const tokenData = {
         address: trimmed,
         symbol: logoData?.symbol || dexData?.symbol || 'Unknown',
         name: logoData?.name || dexData?.name || 'Unknown Token',
         logo: logoData?.logo || null,
-        // ✅ Pass decimals through so SwapWidget uses correct precision
         decimals: logoData?.decimals || 18,
         chain,
         priceUSD: dexData?.priceUSD || logoData?.priceUSD || 0,
