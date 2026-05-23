@@ -12,6 +12,38 @@ import TokenIcon from '@/components/TokenIcon';
 import TrendingTokens from '@/components/TrendingTokens';
 import { FarcasterWalletConnector } from '@/components/FarcasterWalletConnector';
 
+// Popular tokens on Base network
+const POPULAR_TOKENS = {
+  ETH: {
+    symbol: 'ETH',
+    name: 'Ethereum',
+    address: 'ETH',
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
+    decimals: 18,
+  },
+  USDC: {
+    symbol: 'USDC',
+    name: 'USD Coin',
+    address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913/logo.png',
+    decimals: 6,
+  },
+  WBTC: {
+    symbol: 'WBTC',
+    name: 'Wrapped Bitcoin',
+    address: '0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C',
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C/logo.png',
+    decimals: 8,
+  },
+  WETH: {
+    symbol: 'WETH',
+    name: 'Wrapped Ether',
+    address: '0x4200000000000000000000000000000000000006',
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x4200000000000000000000000000000000000006/logo.png',
+    decimals: 18,
+  },
+};
+
 export default function Home() {
   // ============ WALLET HOOKS ============
   const { isConnected: isBaseConnected } = useAccount();
@@ -74,9 +106,25 @@ export default function Home() {
   }, []);
 
   const handleTrendingTokenSelect = useCallback((token) => {
-    // Search the trending token
     handleSearch(token.address);
   }, [handleSearch]);
+
+  // ✅ NEW: Handle token selection from WalletPortfolio
+  const handleTokenSelect = useCallback((token) => {
+    // Convert token from portfolio format to swap format
+    const swapToken = {
+      symbol: token.symbol,
+      name: token.name,
+      address: token.address,
+      logo: token.logo,
+      decimals: token.decimals,
+      priceUSD: token.symbol === 'ETH' ? 3200 : token.symbol === 'WBTC' ? 65000 : token.symbol === 'USDC' ? 1 : 3200,
+    };
+    setSelectedToken(swapToken);
+    setTimeout(() => {
+      swapSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+  }, []);
 
   // ============ RENDER ============
   return (
@@ -94,7 +142,7 @@ export default function Home() {
             </span>
           </div>
           
-          {/* Network Badge - Hanya Base */}
+          {/* Network Badge */}
           <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-blue-500/20 rounded-full">
             <img 
               src="https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png" 
@@ -104,7 +152,7 @@ export default function Home() {
             <span className="text-sm text-blue-300">Base Network</span>
           </div>
           
-          {/* Connect Button - Menggunakan FarcasterWalletConnector */}
+          {/* Connect Button */}
           <div className="flex items-center gap-3">
             <FarcasterWalletConnector />
           </div>
@@ -288,17 +336,21 @@ export default function Home() {
             <SearchHistory onSelect={handleSearch} />
           </div>
 
-          {/* Wallet Portfolio */}
+          {/* Wallet Portfolio - Connected to Swap */}
           {isBaseConnected && (
             <div className="mb-6">
-              <WalletPortfolio network="base" refreshTrigger={refreshPortfolio} />
+              <WalletPortfolio 
+                network="base" 
+                refreshTrigger={refreshPortfolio}
+                onTokenSelect={handleTokenSelect}
+              />
             </div>
           )}
 
           {/* Swap Widget */}
           {selectedToken && (
             <div id="swap" ref={swapSectionRef} className="mb-6 scroll-mt-24">
-              <SwapWidget token={selectedToken} network="base" onSuccess={handleSwapSuccess} />
+              <SwapWidget token={selectedToken} onSuccess={handleSwapSuccess} />
             </div>
           )}
 
