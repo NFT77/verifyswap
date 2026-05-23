@@ -5,7 +5,7 @@ import { WagmiProvider, createConfig, http } from 'wagmi';
 import { base } from 'wagmi/chains';
 import { RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { farcasterMiniAppConnector } from '@farcaster/miniapp-wagmi-connector';
+import { farcasterFrame } from '@farcaster/miniapp-wagmi-connector'; // ✅ GANTI: pake farcasterFrame
 import { wagmiConfig } from '@/lib/wagmi';
 import '@rainbow-me/rainbowkit/styles.css';
 
@@ -17,7 +17,7 @@ const farcasterConfig = createConfig({
   transports: {
     [base.id]: http('https://mainnet.base.org'),
   },
-  connectors: [farcasterMiniAppConnector()],
+  connectors: [farcasterFrame()], // ✅ GANTI: pake farcasterFrame()
 });
 
 export function Providers({ children }) {
