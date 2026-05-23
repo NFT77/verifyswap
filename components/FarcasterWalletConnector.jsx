@@ -120,7 +120,8 @@ export function FarcasterWalletConnector() {
       await disconnect();
       setAutoConnectDone(false);
       setReconnectAttempts(0);
-      if (inFarcaster) {
+      // ✅ Hanya reload di browser biasa, tidak di Farcaster
+      if (!inFarcaster) {
         setTimeout(() => window.location.reload(), 100);
       }
     } catch (error) {
@@ -140,6 +141,19 @@ export function FarcasterWalletConnector() {
 
   // ── Sudah connect dan proper ──
   if (isConnected && address && isWalletProperlyConnected()) {
+    // ✅ Di Farcaster: hanya tampilkan address, tanpa tombol disconnect
+    if (inFarcaster) {
+      return (
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 rounded-full">
+          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+          <span className="text-sm text-white font-mono">
+            {address.slice(0, 6)}...{address.slice(-4)}
+          </span>
+        </div>
+      );
+    }
+    
+    // ✅ Di browser biasa: tampilkan address + tombol disconnect
     return (
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 rounded-full">
