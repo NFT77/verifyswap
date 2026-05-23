@@ -38,6 +38,11 @@ function getCachedData(key) {
 }
 
 function setCachedData(key, data) {
+  // Hapus cache lama jika terlalu banyak (max 100)
+  if (cache.size > 100) {
+    const oldestKey = cache.keys().next().value;
+    cache.delete(oldestKey);
+  }
   cache.set(key, { data, timestamp: Date.now() });
 }
 
@@ -73,16 +78,18 @@ export async function GET(request) {
   if (!NEYNAR_API_KEY) {
     console.error('NEYNAR_API_KEY not configured');
     return NextResponse.json(
-      { error: 'API key not configured' },
+      { error: 'API key not configured. Please set NEYNAR_API_KEY in environment variables.' },
       { status: 500 }
     );
   }
 
   // Check cache
   const cacheKey = getCacheKey(fid, username);
-  const cachedData = getCachedData(cacheKey);
-  if (cachedData) {
-    return NextResponse.json({ profile: cachedData, cached: true });
+  if (cacheKey) {
+    const cachedData = getCachedData(cacheKey);
+    if (cachedData) {
+      return NextResponse.json({ profile: cachedData, cached: true });
+    }
   }
 
   try {
@@ -104,7 +111,7 @@ export async function GET(request) {
         console.error(`Neynar API error: ${res.status}`);
         if (res.status === 401) {
           return NextResponse.json(
-            { error: 'Invalid API key' },
+            { error: 'Invalid API key. Please check your NEYNAR_API_KEY.' },
             { status: 401 }
           );
         }
@@ -121,7 +128,7 @@ export async function GET(request) {
       user = data?.users?.[0];
       
       if (!user) {
-        return NextResponse.json({ error: 'User not found' }, { status: 404 });
+        return NextResponse.json({ error: `User with fid ${fid} not found` }, { status: 404 });
       }
     } else {
       // Lookup by username
@@ -143,6 +150,7 @@ export async function GET(request) {
         user = data?.user;
       } else {
         // Fallback to /user/search
+        console.log(`by_username returned ${byUsernameRes.status}, trying search fallback`);
         const searchRes = await fetch(
           `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(cleanUsername)}&limit=1`,
           {
@@ -162,14 +170,16 @@ export async function GET(request) {
       }
       
       if (!user) {
-        return NextResponse.json({ error: 'User not found' }, { status: 404 });
+        return NextResponse.json({ error: `User with username ${username} not found` }, { status: 404 });
       }
     }
 
     const mappedUser = mapUser(user);
     
     // Cache the result
-    setCachedData(cacheKey, mappedUser);
+    if (cacheKey) {
+      setCachedData(cacheKey, mappedUser);
+    }
     
     return NextResponse.json({ profile: mappedUser, cached: false });
 

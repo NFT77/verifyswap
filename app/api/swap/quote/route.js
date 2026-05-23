@@ -8,7 +8,7 @@ const quoteCache = new Map();
 const CACHE_TTL = 2 * 1000; // 2 seconds
 
 function getCacheKey(tokenIn, tokenOut, amount, slippage) {
-  return `base:${tokenIn}:${tokenOut}:${amount}:${slippage}`;
+  return `base:${tokenIn || 'empty'}:${tokenOut || 'empty'}:${amount || 'empty'}:${slippage || 'empty'}`;
 }
 
 function getCachedQuote(key) {
@@ -20,6 +20,11 @@ function getCachedQuote(key) {
 }
 
 function setCachedQuote(key, data) {
+  // Hapus cache lama jika terlalu banyak (max 100)
+  if (quoteCache.size > 100) {
+    const oldestKey = quoteCache.keys().next().value;
+    quoteCache.delete(oldestKey);
+  }
   quoteCache.set(key, { data, timestamp: Date.now() });
 }
 
@@ -68,7 +73,7 @@ export async function GET(request) {
   const cacheKey = getCacheKey(tokenIn, tokenOut, amount, slippage);
   const cachedResult = getCachedQuote(cacheKey);
   if (cachedResult) {
-    return NextResponse.json(cachedResult);
+    return NextResponse.json({ ...cachedResult, cached: true });
   }
 
   try {
@@ -79,7 +84,7 @@ export async function GET(request) {
         { status: 400 }
       );
     }
-    if (!tokenOut.startsWith('0x')) {
+    if (!tokenOut || !tokenOut.startsWith('0x')) {
       return NextResponse.json(
         { error: 'Invalid tokenOut format for Base chain' },
         { status: 400 }
@@ -87,14 +92,19 @@ export async function GET(request) {
     }
 
     // ========== ATTEMPT 1: OKX DEX Aggregator ==========
-    const okxQuote = await getOkxQuote({
-      chain: 'base',
-      tokenIn: tokenIn === 'ETH' ? 'ETH' : tokenIn,
-      tokenOut: tokenOut,
-      amount: amountNum,
-      slippage,
-      feePercent: 0.3,
-    });
+    let okxQuote = null;
+    try {
+      okxQuote = await getOkxQuote({
+        chain: 'base',
+        tokenIn: tokenIn === 'ETH' ? 'ETH' : tokenIn,
+        tokenOut: tokenOut,
+        amount: amountNum,
+        slippage,
+        feePercent: 0.3,
+      });
+    } catch (okxError) {
+      console.error('OKX quote error:', okxError.message);
+    }
 
     if (okxQuote && okxQuote.success) {
       const response = {
@@ -122,12 +132,17 @@ export async function GET(request) {
       : tokenIn;
     const amountInWei = BigInt(Math.floor(amountNum * 1e18)).toString();
     
-    const uniswapQuote = await getUniswapQuote({
-      tokenIn: tokenInAddress,
-      tokenOut: tokenOut,
-      amountIn: amountInWei,
-      slippage: slippage,
-    });
+    let uniswapQuote = null;
+    try {
+      uniswapQuote = await getUniswapQuote({
+        tokenIn: tokenInAddress,
+        tokenOut: tokenOut,
+        amountIn: amountInWei,
+        slippage: slippage,
+      });
+    } catch (uniswapError) {
+      console.error('Uniswap quote error:', uniswapError.message);
+    }
 
     if (uniswapQuote && uniswapQuote.success) {
       const response = {
@@ -163,7 +178,6 @@ export async function GET(request) {
     // ========== ATTEMPT 3: DexScreener Fallback ==========
     console.warn('Uniswap also failed, falling back to DexScreener');
     try {
-      // Get ETH price from CoinGecko
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
       
@@ -191,7 +205,7 @@ export async function GET(request) {
             success: true,
             amountOut: amountOut,
             priceImpact: 0.5,
-            route: ['ETH', pair.baseToken?.symbol],
+            route: ['ETH', pair.baseToken?.symbol || 'Unknown'],
             bestRoute: null,
             routeComparisons: [],
             source: 'dexscreener_fallback',

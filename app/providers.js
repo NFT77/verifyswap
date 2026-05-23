@@ -1,48 +1,56 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { WagmiProvider } from 'wagmi';
+import { WagmiProvider, createConfig, http } from 'wagmi';
+import { base } from 'wagmi/chains';
 import { RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { wagmiConfig, farcasterWagmiConfig } from '@/lib/wagmi';
+import { farcasterMiniAppConnector } from '@farcaster/miniapp-wagmi-connector';
+import { wagmiConfig } from '@/lib/wagmi';
 import '@rainbow-me/rainbowkit/styles.css';
 
 const queryClient = new QueryClient();
 
+// === Konfigurasi khusus untuk Farcaster Mini App ===
+const farcasterConfig = createConfig({
+  chains: [base],
+  transports: {
+    [base.id]: http('https://mainnet.base.org'),
+  },
+  connectors: [farcasterMiniAppConnector()],
+});
+
 export function Providers({ children }) {
-  const [mounted, setMounted]       = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [inFarcaster, setInFarcaster] = useState(false);
 
   useEffect(() => {
     const init = async () => {
       try {
-        // ✅ Panggil ready() DULU — baru cek context
         const { sdk } = await import('@farcaster/miniapp-sdk');
         const context = await sdk.context;
 
         if (context?.user?.fid) {
-          // Benar-benar di dalam Farcaster client
           setInFarcaster(true);
-          await sdk.actions.ready(); // splash screen hilang
+          await sdk.actions.ready();
+          console.log('✅ Farcaster Mini App ready, FID:', context.user.fid);
         }
-      } catch {
-        // Berjalan di browser biasa — tidak apa-apa
+      } catch (error) {
+        console.log('Not in Farcaster environment:', error);
       } finally {
-        setMounted(true); // render SETELAH context diketahui
+        setMounted(true);
       }
     };
 
     init();
   }, []);
 
-  // Jangan render apapun dulu sebelum context diketahui
-  // (hindari flash/switch config)
   if (!mounted) return null;
 
-  // ── Dalam Farcaster: pakai Warplet via farcasterFrame connector ──
+  // === FARCASTER MODE ===
   if (inFarcaster) {
     return (
-      <WagmiProvider config={farcasterWagmiConfig}>
+      <WagmiProvider config={farcasterConfig}>
         <QueryClientProvider client={queryClient}>
           {children}
         </QueryClientProvider>
@@ -50,7 +58,7 @@ export function Providers({ children }) {
     );
   }
 
-  // ── Browser biasa: RainbowKit ────────────────────────────────────
+  // === BROWSER MODE ===
   return (
     <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>

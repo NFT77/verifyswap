@@ -118,7 +118,7 @@ export async function POST(request) {
             feeAmount: feeAmount,
             feeRecipient: feeRecipient,
           },
-          message: `✅ Swap ${amountAfterFee} ${tokenIn} → ${tokenOut} via OKX. Fee ${feePercent}% (${feeAmount.toFixed(6)} ETH)`,
+          message: `✅ Swap ${amountAfterFee} ${tokenIn === 'ETH' ? 'ETH' : 'tokens'} → ${tokenOut} via OKX. Fee ${feePercent}% (${feeAmount.toFixed(6)} ETH)`,
         }));
       }
     } catch (okxError) {
