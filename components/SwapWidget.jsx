@@ -42,11 +42,42 @@ export default function SwapWidget({ token, onSuccess }) {
   const [txHash, setTxHash] = useState(null);
   const [swapDirection, setSwapDirection] = useState('buy');
   const [isExecuting, setIsExecuting] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
+  
+  // ✅ UI State untuk notifikasi (ganti alert)
+  const [swapError, setSwapError] = useState('');
+  const [swapSuccess, setSwapSuccess] = useState('');
+  const [showRetry, setShowRetry] = useState(false);
+  const [retrySlippage, setRetrySlippage] = useState(0);
+  const [pendingExecuteSwap, setPendingExecuteSwap] = useState(null);
   
   // State untuk route selection
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [selectedRouterAddress, setSelectedRouterAddress] = useState(null);
+
+  // ✅ Fetch dengan timeout (didefinisikan di dalam komponen)
+  const fetchWithTimeout = useCallback(async (url, options = {}, ms = 10000) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), ms);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Request timed out. Please check your connection.');
+      }
+      throw error;
+    }
+  }, []);
+
+  // Auto-hide success message setelah 5 detik
+  useEffect(() => {
+    if (swapSuccess) {
+      const timer = setTimeout(() => setSwapSuccess(''), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [swapSuccess]);
 
   // Reset selected route when quote changes
   useEffect(() => {
@@ -71,12 +102,16 @@ export default function SwapWidget({ token, onSuccess }) {
       }
       
       setIsLoadingQuote(true);
+      setSwapError('');
+      
       try {
         const tokenIn = swapDirection === 'buy' ? 'ETH' : token.address;
         const tokenOut = swapDirection === 'buy' ? token.address : 'ETH';
         
-        const res = await fetch(
-          `/api/swap/quote?chain=base&tokenIn=${tokenIn}&tokenOut=${tokenOut}&amount=${amount}&slippage=${slippage}`
+        const res = await fetchWithTimeout(
+          `/api/swap/quote?chain=base&tokenIn=${tokenIn}&tokenOut=${tokenOut}&amount=${amount}&slippage=${slippage}`,
+          {},
+          8000
         );
         const data = await res.json();
         
@@ -88,6 +123,11 @@ export default function SwapWidget({ token, onSuccess }) {
         }
       } catch (err) {
         console.error('Quote error:', err);
+        if (err.message?.includes('timed out')) {
+          setSwapError('Quote request timed out. Please try again.');
+        } else {
+          setSwapError(err.message || 'Failed to get quote');
+        }
         setQuote(null);
       } finally {
         setIsLoadingQuote(false);
@@ -96,7 +136,7 @@ export default function SwapWidget({ token, onSuccess }) {
     
     const timeout = setTimeout(fetchQuote, 500);
     return () => clearTimeout(timeout);
-  }, [amount, token, slippage, swapDirection]);
+  }, [amount, token, slippage, swapDirection, fetchWithTimeout]);
 
   const toggleDirection = useCallback(() => {
     setSwapDirection(prev => prev === 'buy' ? 'sell' : 'buy');
@@ -105,6 +145,8 @@ export default function SwapWidget({ token, onSuccess }) {
     setTxHash(null);
     setSelectedRoute(null);
     setSelectedRouterAddress(null);
+    setSwapError('');
+    setSwapSuccess('');
   }, []);
 
   // Handle custom slippage input
@@ -132,7 +174,7 @@ export default function SwapWidget({ token, onSuccess }) {
   }, [quote]);
 
   // Fungsi untuk mendapatkan pesan error yang user-friendly
-  const getUserFriendlyErrorMessage = (err) => {
+  const getUserFriendlyErrorMessage = useCallback((err) => {
     const errorMessage = err.message?.toLowerCase() || '';
     const shortMessage = err.shortMessage?.toLowerCase() || '';
     
@@ -151,34 +193,38 @@ export default function SwapWidget({ token, onSuccess }) {
     if (errorMessage.includes('execution reverted') || shortMessage.includes('execution reverted')) {
       return 'Transaction failed. Common causes:\n• Slippage too low (try 1-3%)\n• Token liquidity issues\n• Try a smaller amount';
     }
+    if (errorMessage.includes('timed out') || errorMessage.includes('timeout')) {
+      return 'Request timed out. Please check your connection and try again.';
+    }
     return `Swap failed: ${err.shortMessage || err.message || 'Unknown error'}`;
-  };
+  }, []);
 
   // Handle swap on Base dengan retry logic
   const handleBaseSwap = useCallback(async () => {
     if (!quote || !token) return;
     
     if (!address) {
-      alert('Please connect your wallet first to swap');
+      setSwapError('Please connect your wallet first to swap');
       return;
     }
 
     // Cek status koneksi wallet
     if (status === 'disconnected') {
-      alert('Wallet disconnected. Please refresh the page and reconnect.');
+      setSwapError('Wallet disconnected. Please refresh the page and reconnect.');
       return;
     }
     
     setIsExecuting(true);
-    setRetryCount(0);
+    setSwapError('');
+    setSwapSuccess('');
     
-    const executeSwap = async (retry = false) => {
+    const executeSwap = async (retry = false, retrySlippageValue = null) => {
       try {
         const amountIn = parseFloat(amount);
         const amountInWei = BigInt(Math.floor(amountIn * 1e18));
         
         // Gunakan slippage lebih tinggi untuk retry
-        const effectiveSlippage = retry ? Math.min(slippage + 1, 5) : slippage;
+        const effectiveSlippage = retry ? retrySlippageValue || Math.min(slippage + 1, 5) : slippage;
         const activeRoute = selectedRoute;
         const amountOutValue = activeRoute?.receiveAmount || quote.amountOut;
         const amountOutMin = BigInt(Math.floor(amountOutValue * (1 - effectiveSlippage / 100) * 1e18));
@@ -194,7 +240,7 @@ export default function SwapWidget({ token, onSuccess }) {
         console.log(`🔄 Executing swap on: ${dexName} (${routerAddress})`);
         if (retry) console.log(`⚠️ Retry attempt with ${effectiveSlippage}% slippage`);
         
-        const executeResponse = await fetch('/api/swap/execute', {
+        const executeResponse = await fetchWithTimeout('/api/swap/execute', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -209,7 +255,7 @@ export default function SwapWidget({ token, onSuccess }) {
             selectedRouterAddress: routerAddress,
             selectedDexName: dexName,
           }),
-        });
+        }, 15000);
         
         const result = await executeResponse.json();
         
@@ -238,10 +284,10 @@ export default function SwapWidget({ token, onSuccess }) {
           });
           
           setTxHash(hash);
-          alert(`✅ Swap successful on ${dexName}! Tx: ${hash.slice(0, 10)}...`);
+          setSwapSuccess(`Swap successful on ${dexName}! Tx: ${hash.slice(0, 10)}...`);
           onSuccess?.();
         } else {
-          alert(result.message || 'Swap successful!');
+          setSwapSuccess(result.message || 'Swap successful!');
           onSuccess?.();
         }
         
@@ -254,23 +300,41 @@ export default function SwapWidget({ token, onSuccess }) {
                           errorMessage.includes('slippage') ||
                           errorMessage.includes('price');
         
-        if (needsRetry && retryCount < 2) {
-          setRetryCount(prev => prev + 1);
-          const userConfirmed = confirm(`Transaction failed due to price movement. Retry with ${Math.min(slippage + (retryCount + 1), 5)}% slippage?`);
-          if (userConfirmed) {
-            await executeSwap(true);
-            return;
-          }
+        if (needsRetry && !showRetry) {
+          const newSlippage = Math.min(slippage + 1, 5);
+          setRetrySlippage(newSlippage);
+          setShowRetry(true);
+          setPendingExecuteSwap(() => async () => {
+            await executeSwap(true, newSlippage);
+          });
+          return;
         }
         
         const userMessage = getUserFriendlyErrorMessage(err);
-        alert(userMessage);
+        setSwapError(userMessage);
       }
     };
     
     await executeSwap(false);
     setIsExecuting(false);
-  }, [quote, token, address, amount, slippage, swapDirection, selectedRoute, selectedRouterAddress, onSuccess, writeContractAsync, status, retryCount]);
+  }, [quote, token, address, amount, slippage, swapDirection, selectedRoute, selectedRouterAddress, onSuccess, writeContractAsync, status, showRetry, getUserFriendlyErrorMessage, fetchWithTimeout]);
+
+  // Handle retry from UI
+  const handleRetry = useCallback(async () => {
+    setShowRetry(false);
+    if (pendingExecuteSwap) {
+      setIsExecuting(true);
+      await pendingExecuteSwap();
+      setIsExecuting(false);
+      setPendingExecuteSwap(null);
+    }
+  }, [pendingExecuteSwap]);
+
+  const handleCancelRetry = useCallback(() => {
+    setShowRetry(false);
+    setPendingExecuteSwap(null);
+    setIsExecuting(false);
+  }, []);
 
   if (!token) return null;
 
@@ -307,6 +371,49 @@ export default function SwapWidget({ token, onSuccess }) {
 
   return (
     <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-5">
+      {/* ✅ Error Message UI */}
+      {swapError && (
+        <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl">
+          <p className="text-red-400 text-sm whitespace-pre-line">{swapError}</p>
+          <button 
+            onClick={() => setSwapError('')}
+            className="text-xs text-red-300 mt-1 underline hover:text-red-200 transition"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* ✅ Success Message UI */}
+      {swapSuccess && (
+        <div className="mb-4 p-3 bg-green-500/20 border border-green-500/30 rounded-xl">
+          <p className="text-green-400 text-sm">✅ {swapSuccess}</p>
+        </div>
+      )}
+
+      {/* ✅ Retry Prompt UI (ganti confirm) */}
+      {showRetry && (
+        <div className="mb-4 p-3 bg-yellow-500/20 border border-yellow-500/30 rounded-xl">
+          <p className="text-yellow-400 text-sm mb-2">
+            ⚠️ Price moved. Retry with {retrySlippage}% slippage?
+          </p>
+          <div className="flex gap-2">
+            <button 
+              onClick={handleRetry}
+              className="px-3 py-1 bg-yellow-500 text-black rounded-lg text-sm font-medium hover:bg-yellow-400 transition"
+            >
+              Retry
+            </button>
+            <button 
+              onClick={handleCancelRetry}
+              className="px-3 py-1 bg-white/10 text-white rounded-lg text-sm hover:bg-white/20 transition"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">

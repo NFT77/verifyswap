@@ -1,19 +1,36 @@
 // app/api/search/route.js
 import { NextResponse } from 'next/server';
-import { verifyTokenContract, getTokenRiskAssessment } from '@/lib/api/etherscan';
+import { verifyTokenContract } from '@/lib/api/etherscan';
 import { searchTokenOnCoinGecko } from '@/lib/api/coingecko';
-import { searchTokenOnCMC, getTokenQuoteCMC } from '@/lib/api/coinmarketcap';
+import { searchTokenOnCMC } from '@/lib/api/coinmarketcap';
 import { getTokenMetadataMoralis } from '@/lib/api/moralis';
 import { checkTokenSecurity } from '@/lib/api/goplus';
 
 const NEYNAR_API_KEY = process.env.NEYNAR_API_KEY;
 
-// Simple in-memory cache for token searches (5 seconds TTL)
+// ✅ Cache TTL diperpanjang — kurangi API calls berulang
 const tokenCache = new Map();
-const CACHE_TTL = 5 * 1000; // 5 seconds
+const CACHE_TTL = 30 * 1000; // 30 detik
+
+// ✅ Helper: fetch dengan timeout agar tidak hang di Mini App
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`Timeout after ${timeoutMs}ms: ${url}`);
+    }
+    throw err;
+  }
+}
 
 function getCachedToken(address) {
-  const cached = tokenCache.get(address);
+  const cached = tokenCache.get(address.toLowerCase());
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return cached.data;
   }
@@ -21,7 +38,7 @@ function getCachedToken(address) {
 }
 
 function setCachedToken(address, data) {
-  tokenCache.set(address, { data, timestamp: Date.now() });
+  tokenCache.set(address.toLowerCase(), { data, timestamp: Date.now() });
 }
 
 function mapUser(user) {
@@ -37,22 +54,53 @@ function mapUser(user) {
   };
 }
 
-// ========== MULTI-SOURCE TOKEN LOOKUP ==========
+// ✅ DexScreener dengan timeout
+async function getDexScreenerData(address, chain) {
+  try {
+    const res = await fetchWithTimeout(
+      `https://api.dexscreener.com/latest/dex/tokens/${address}`,
+      {},
+      8000
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    const pair = json.pairs?.find(p =>
+      chain === 'base' ? p.chainId === 'base' : p.chainId === 'solana'
+    );
+    if (!pair) return null;
+    return {
+      symbol: pair.baseToken?.symbol,
+      name: pair.baseToken?.name,
+      priceUSD: parseFloat(pair.priceUsd || 0),
+      liquidityUSD: parseFloat(pair.liquidity?.usd || 0),
+      volume24h: parseFloat(pair.volume?.h24 || 0),
+      priceChange24h: parseFloat(pair.priceChange?.h24 || 0),
+    };
+  } catch (err) {
+    console.error('DexScreener error:', err.message);
+    return null;
+  }
+}
+
+// ✅ Multi-source logo dengan timeout per source
 async function getTokenLogoFromMultipleSources(tokenAddress, chain, symbol) {
   const sources = [
     { name: 'CoinGecko', fn: () => searchTokenOnCoinGecko(tokenAddress, chain) },
     { name: 'CoinMarketCap', fn: () => searchTokenOnCMC(tokenAddress, chain) },
     { name: 'Moralis', fn: () => getTokenMetadataMoralis(tokenAddress, chain) },
   ];
-  
+
   for (const source of sources) {
     try {
-      const result = await source.fn();
-      if (result?.logo) {
-        console.log(`Logo found via ${source.name}: ${result.logo}`);
-        return result;
-      }
-      if (result?.symbol || result?.name) {
+      // ✅ Timeout 6 detik per source
+      const result = await Promise.race([
+        source.fn(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`${source.name} timeout`)), 6000)
+        ),
+      ]);
+      if (result?.logo || result?.symbol || result?.name) {
+        console.log(`Data found via ${source.name}`);
         return result;
       }
     } catch (err) {
@@ -62,54 +110,170 @@ async function getTokenLogoFromMultipleSources(tokenAddress, chain, symbol) {
   return null;
 }
 
-async function getFarcasterProfileByFid(fid) {
-  if (!NEYNAR_API_KEY) return null;
+// ✅ Security check dengan timeout
+async function getSecurityData(address, chain) {
+  const result = {
+    isHoneypot: false,
+    isFakeVolume: false,
+    hasHiddenOwner: false,
+    isVerified: false,
+    isMintable: false,
+    isOwnerRenounced: false,
+    holderCount: 0,
+    top10HolderRate: 0,
+    riskFactors: [],
+    riskLevel: 'unknown',
+  };
+
+  if (chain !== 'base') return result;
+
+  // GoPlus + Etherscan parallel dengan timeout
+  const [goplusResult, etherscanResult] = await Promise.allSettled([
+    Promise.race([
+      checkTokenSecurity(address, chain),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('GoPlus timeout')), 7000)
+      ),
+    ]),
+    Promise.race([
+      verifyTokenContract(address),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Etherscan timeout')), 7000)
+      ),
+    ]),
+  ]);
+
+  // ✅ GoPlus result
+  if (goplusResult.status === 'fulfilled' && goplusResult.value) {
+    const g = goplusResult.value;
+    result.isHoneypot = g.isHoneypot || false;
+    result.isFakeVolume = g.isFakeVolume || false;
+    result.hasHiddenOwner = !!g.ownerAddress;
+    result.isMintable = g.isMintable || false;
+    result.isOwnerRenounced = g.isOwnerRenounced || false;
+    result.holderCount = g.holderCount || 0;
+    result.top10HolderRate = g.top10HolderRate || 0;
+    result.riskFactors = g.riskFactors || [];
+    result.riskLevel = g.riskLevel || 'unknown';
+  } else {
+    console.error('GoPlus failed:', goplusResult.reason?.message);
+    result.riskFactors.push('Security check unavailable');
+  }
+
+  // ✅ Etherscan result
+  if (etherscanResult.status === 'fulfilled' && etherscanResult.value) {
+    result.isVerified = etherscanResult.value.isVerified || false;
+    if (!result.isVerified) {
+      result.riskFactors.push('Contract not verified on Etherscan');
+      if (!['critical', 'high'].includes(result.riskLevel)) {
+        result.riskLevel = 'medium';
+      }
+    }
+  } else {
+    console.error('Etherscan failed:', etherscanResult.reason?.message);
+  }
+
+  return result;
+}
+
+function calculateTrustScore(security, token) {
+  if (security.isHoneypot) return 0;
+  if (security.hasHiddenOwner) return 15;
+  if (security.isFakeVolume) return 25;
+  if (!security.isVerified) return 35;
+  if (security.isMintable) return 45;
+  if (security.holderCount > 10000) return 85;
+  if (security.holderCount > 1000) return 75;
+  if (security.holderCount > 100) return 65;
+  if (token.liquidityUSD > 100000) return 70;
+  if (token.liquidityUSD > 50000) return 60;
+  if (token.liquidityUSD > 10000) return 50;
+  if (token.liquidityUSD > 1000) return 35;
+  return 25;
+}
+
+async function getFarcasterProfile(query, byFid = false) {
+  if (!NEYNAR_API_KEY) {
+    console.error('NEYNAR_API_KEY not set');
+    return null;
+  }
 
   try {
-    const res = await fetch(
-      `https://api.neynar.com/v2/farcaster/user/bulk?fids=${fid}`,
-      { headers: { 'accept': 'application/json', 'api_key': NEYNAR_API_KEY } }
+    let url;
+    if (byFid) {
+      url = `https://api.neynar.com/v2/farcaster/user/bulk?fids=${query}`;
+    } else {
+      const clean = query.replace('@', '');
+      url = `https://api.neynar.com/v2/farcaster/user/by_username?username=${clean}`;
+    }
+
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
+      8000
     );
-    if (!res.ok) return null;
+
+    if (!res.ok) {
+      // Fallback ke search jika by_username gagal
+      if (!byFid) {
+        const clean = query.replace('@', '');
+        const searchRes = await fetchWithTimeout(
+          `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(clean)}&limit=1`,
+          { headers: { accept: 'application/json', api_key: NEYNAR_API_KEY } },
+          8000
+        );
+        if (searchRes.ok) {
+          const d = await searchRes.json();
+          const user = d?.result?.users?.[0];
+          return user ? mapUser(user) : null;
+        }
+      }
+      return null;
+    }
+
     const data = await res.json();
-    const user = data?.users?.[0];
-    if (!user) return null;
-    return mapUser(user);
-  } catch (error) {
-    console.error('Get by FID error:', error);
+    const user = byFid ? data?.users?.[0] : data?.user;
+    return user ? mapUser(user) : null;
+  } catch (err) {
+    console.error('Farcaster profile error:', err.message);
     return null;
   }
 }
 
-async function getFarcasterProfileByUsername(username) {
-  if (!NEYNAR_API_KEY) return null;
+function buildTrustResponse(profile) {
+  let trustScore = 50;
+  const fc = profile.followerCount;
+  if (fc > 10000) trustScore = 85;
+  else if (fc > 5000) trustScore = 75;
+  else if (fc > 1000) trustScore = 65;
+  else if (fc > 100) trustScore = 50;
+  else trustScore = 35;
 
-  try {
-    const cleanUsername = username.replace('@', '');
-    const res = await fetch(
-      `https://api.neynar.com/v2/farcaster/user/by_username?username=${cleanUsername}`,
-      { headers: { 'accept': 'application/json', 'api_key': NEYNAR_API_KEY } }
-    );
-    if (!res.ok) {
-      const searchRes = await fetch(
-        `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(cleanUsername)}&limit=1`,
-        { headers: { 'accept': 'application/json', 'api_key': NEYNAR_API_KEY } }
-      );
-      if (searchRes.ok) {
-        const searchData = await searchRes.json();
-        const user = searchData?.result?.users?.[0];
-        if (user) return mapUser(user);
-      }
-      return null;
-    }
-    const data = await res.json();
-    const user = data?.user;
-    if (!user) return null;
-    return mapUser(user);
-  } catch (error) {
-    console.error('Get by username error:', error);
-    return null;
-  }
+  return {
+    type: 'fid',
+    fid: profile.fid,
+    profile: {
+      username: profile.username,
+      displayName: profile.displayName,
+      pfp_url: profile.pfp_url ||
+        `https://client.warpcast.com/v1/user-avatar?username=${profile.username}`,
+      followerCount: profile.followerCount,
+      followingCount: profile.followingCount,
+    },
+    trustScore,
+  };
+}
+
+// ✅ Response headers untuk Mini App Farcaster (CORS)
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Cache-Control': 'public, s-maxage=30',
+};
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
 export async function GET(request) {
@@ -117,267 +281,90 @@ export async function GET(request) {
   const query = searchParams.get('q');
   const chain = searchParams.get('chain') || 'base';
 
-  if (!query) {
-    return NextResponse.json({ error: 'Query parameter required' }, { status: 400 });
+  if (!query?.trim() || query.trim().length > 500) {
+    return NextResponse.json(
+      { error: 'Invalid query' },
+      { status: 400, headers: CORS_HEADERS }
+    );
   }
 
-  const trimmedQuery = query.trim();
-  if (trimmedQuery.length === 0 || trimmedQuery.length > 500) {
-    return NextResponse.json({ error: 'Invalid query length' }, { status: 400 });
-  }
+  const trimmed = query.trim();
 
   try {
-    // ========== CEK TOKEN ADDRESS ==========
-    const isBaseAddress = /^0x[a-fA-F0-9]{40}$/i.test(trimmedQuery);
-    const isSolanaAddress = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/i.test(trimmedQuery);
-    
-    if (isBaseAddress || isSolanaAddress) {
-      const cachedResult = getCachedToken(trimmedQuery);
-      if (cachedResult) {
-        return NextResponse.json(cachedResult);
+    // ── Token address ──────────────────────────────────────────────────────
+    const isEVMAddress = /^0x[a-fA-F0-9]{40}$/i.test(trimmed);
+    const isSolanaAddress = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/i.test(trimmed);
+
+    if (isEVMAddress || isSolanaAddress) {
+      const cached = getCachedToken(trimmed);
+      if (cached) {
+        return NextResponse.json(cached, { headers: CORS_HEADERS });
       }
-      
-      // Step 1: Dapatkan data dasar dari DexScreener (harga, liquidity)
-      let dexData = null;
-      try {
-        const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${trimmedQuery}`);
-        if (dexRes.ok) {
-          const dexJson = await dexRes.json();
-          const pair = dexJson.pairs?.find(p => 
-            (chain === 'base' && p.chainId === 'base') || 
-            (chain === 'solana' && p.chainId === 'solana')
-          );
-          if (pair) {
-            dexData = {
-              symbol: pair.baseToken?.symbol,
-              name: pair.baseToken?.name,
-              priceUSD: parseFloat(pair.priceUsd || 0),
-              liquidityUSD: parseFloat(pair.liquidity?.usd || 0),
-              volume24h: parseFloat(pair.volume?.h24 || 0),
-              priceChange24h: parseFloat(pair.priceChange?.h24 || 0),
-            };
-          }
-        }
-      } catch (err) {
-        console.error('DexScreener error:', err);
-      }
-      
-      // Step 2: Cari logo dari multiple sources
-      const logoData = await getTokenLogoFromMultipleSources(trimmedQuery, chain, dexData?.symbol);
-      
-      // Step 3: SECURITY DETECTION (tanpa canBuy/canSell)
-      let securityData = null;
-      let verificationData = null;
-      let isHoneypot = false;
-      let isFakeVolume = false;
-      let hasHiddenOwner = false;
-      let isVerified = false;
-      let isMintable = false;
-      let isOwnerRenounced = false;
-      let holderCount = 0;
-      let top10HolderRate = 0;
-      let riskFactors = [];
-      let riskLevel = 'low';
-      
-      // Cek keamanan via GoPlus API (khusus Base)
-      if (chain === 'base' && isBaseAddress) {
-        try {
-          const goplusSecurity = await checkTokenSecurity(trimmedQuery, chain);
-          if (goplusSecurity) {
-            isHoneypot = goplusSecurity.isHoneypot || false;
-            isFakeVolume = goplusSecurity.isFakeVolume || false;
-            hasHiddenOwner = !!goplusSecurity.ownerAddress;
-            // canSell dan canBuy TIDAK DIGUNAKAN
-            isMintable = goplusSecurity.isMintable || false;
-            isOwnerRenounced = goplusSecurity.isOwnerRenounced || false;
-            holderCount = goplusSecurity.holderCount || 0;
-            top10HolderRate = goplusSecurity.top10HolderRate || 0;
-            riskFactors = goplusSecurity.riskFactors || [];
-            riskLevel = goplusSecurity.riskLevel || 'low';
-            securityData = goplusSecurity;
-          }
-        } catch (err) {
-          console.error('GoPlus security error:', err);
-        }
-        
-        // Cek verifikasi kontrak via Etherscan
-        try {
-          const verification = await verifyTokenContract(trimmedQuery);
-          if (verification) {
-            isVerified = verification.isVerified || false;
-            verificationData = verification;
-            
-            if (!isVerified) {
-              riskFactors.push('Contract not verified on Etherscan');
-              if (riskLevel !== 'critical' && riskLevel !== 'high') {
-                riskLevel = 'medium';
-              }
-            }
-          }
-        } catch (err) {
-          console.error('Etherscan verification error:', err);
-        }
-      }
-      
-      // Step 4: Gabungkan semua data (tanpa canBuy/canSell)
+
+      // ✅ DexScreener + Logo parallel (tidak tunggu security dulu)
+      const [dexData, logoData] = await Promise.all([
+        getDexScreenerData(trimmed, chain),
+        getTokenLogoFromMultipleSources(trimmed, chain, null),
+      ]);
+
+      // ✅ Security check parallel setelah data dasar siap
+      const security = await getSecurityData(trimmed, chain);
+
       const tokenData = {
-        address: trimmedQuery,
+        address: trimmed,
         symbol: logoData?.symbol || dexData?.symbol || 'Unknown',
         name: logoData?.name || dexData?.name || 'Unknown Token',
         logo: logoData?.logo || null,
-        chain: chain,
+        chain,
         priceUSD: dexData?.priceUSD || logoData?.priceUSD || 0,
         liquidityUSD: dexData?.liquidityUSD || 0,
         volume24h: dexData?.volume24h || logoData?.volume24h || 0,
         priceChange24h: dexData?.priceChange24h || logoData?.priceChange24h || 0,
         marketCap: logoData?.marketCap || 0,
-        marketCapRank: logoData?.marketCapRank || null,
-        // SECURITY FIELDS (tanpa canBuy/canSell)
-        isHoneypot,
-        isFakeVolume,
-        hasHiddenOwner,
-        isVerified,
-        isMintable,
-        isOwnerRenounced,
-        holderCount,
-        top10HolderRate,
-        riskFactors,
-        riskLevel,
-        securityData,
-        verificationData,
+        ...security,
+        trustScore: 0,
       };
-      
-      // Step 5: Trust score calculation (tanpa canBuy/canSell)
-      let trustScore = 50;
-      if (isHoneypot) {
-        trustScore = 0;
-      } else if (hasHiddenOwner) {
-        trustScore = 15;
-      } else if (isFakeVolume) {
-        trustScore = 25;
-      } else if (!isVerified) {
-        trustScore = 35;
-      } else if (isMintable) {
-        trustScore = 45;
-      } else if (holderCount > 10000) {
-        trustScore = 85;
-      } else if (holderCount > 1000) {
-        trustScore = 75;
-      } else if (holderCount > 100) {
-        trustScore = 65;
-      } else if (tokenData.liquidityUSD > 100000) {
-        trustScore = 70;
-      } else if (tokenData.liquidityUSD > 50000) {
-        trustScore = 60;
-      } else if (tokenData.liquidityUSD > 10000) {
-        trustScore = 50;
-      } else if (tokenData.liquidityUSD > 1000) {
-        trustScore = 35;
-      } else {
-        trustScore = 25;
-      }
-      
-      tokenData.trustScore = trustScore;
-      
-      const responseData = {
-        type: 'token',
-        token: tokenData,
-        notFound: false,
-      };
-      
-      setCachedToken(trimmedQuery, responseData);
-      
-      return NextResponse.json(responseData);
+
+      tokenData.trustScore = calculateTrustScore(security, tokenData);
+
+      const response = { type: 'token', token: tokenData, notFound: false };
+      setCachedToken(trimmed, response);
+
+      return NextResponse.json(response, { headers: CORS_HEADERS });
     }
-    
-    // ========== CEK FID (angka) ==========
-    const isFid = /^\d+$/.test(trimmedQuery) && trimmedQuery.length <= 10;
-    
-    if (isFid) {
-      const profile = await getFarcasterProfileByFid(parseInt(trimmedQuery));
-      
-      if (profile && profile.fid) {
-        let trustScore = 50;
-        if (profile.followerCount > 10000) trustScore = 85;
-        else if (profile.followerCount > 5000) trustScore = 75;
-        else if (profile.followerCount > 1000) trustScore = 65;
-        else if (profile.followerCount > 100) trustScore = 50;
-        else trustScore = 35;
-        
-        let finalPfpUrl = profile.pfp_url;
-        if (!finalPfpUrl || finalPfpUrl === '') {
-          finalPfpUrl = `https://client.warpcast.com/v1/user-avatar?username=${profile.username}`;
-        }
-        
-        return NextResponse.json({
-          type: 'fid',
-          fid: profile.fid,
-          profile: {
-            username: profile.username,
-            displayName: profile.displayName,
-            pfp_url: finalPfpUrl,
-            followerCount: profile.followerCount,
-            followingCount: profile.followingCount,
-          },
-          trustScore: trustScore,
-        });
+
+    // ── FID (angka) ────────────────────────────────────────────────────────
+    if (/^\d+$/.test(trimmed) && trimmed.length <= 10) {
+      const profile = await getFarcasterProfile(trimmed, true);
+      if (profile?.fid) {
+        return NextResponse.json(buildTrustResponse(profile), { headers: CORS_HEADERS });
       }
-      
-      return NextResponse.json({
-        type: 'fid',
-        notFound: true,
-        query: trimmedQuery,
-      });
+      return NextResponse.json(
+        { type: 'fid', notFound: true, query: trimmed },
+        { headers: CORS_HEADERS }
+      );
     }
-    
-    // ========== CEK USERNAME ==========
-    const cleanUsername = trimmedQuery.replace('@', '');
-    
+
+    // ── Username ───────────────────────────────────────────────────────────
+    const cleanUsername = trimmed.replace('@', '');
     if (cleanUsername.length > 0 && cleanUsername.length <= 50) {
-      const profile = await getFarcasterProfileByUsername(cleanUsername);
-      
-      if (profile && profile.fid) {
-        let trustScore = 50;
-        if (profile.followerCount > 10000) trustScore = 85;
-        else if (profile.followerCount > 5000) trustScore = 75;
-        else if (profile.followerCount > 1000) trustScore = 65;
-        else if (profile.followerCount > 100) trustScore = 50;
-        else trustScore = 35;
-        
-        let finalPfpUrl = profile.pfp_url;
-        if (!finalPfpUrl || finalPfpUrl === '') {
-          finalPfpUrl = `https://client.warpcast.com/v1/user-avatar?username=${profile.username}`;
-        }
-        
-        return NextResponse.json({
-          type: 'fid',
-          fid: profile.fid,
-          profile: {
-            username: profile.username,
-            displayName: profile.displayName,
-            pfp_url: finalPfpUrl,
-            followerCount: profile.followerCount,
-            followingCount: profile.followingCount,
-          },
-          trustScore: trustScore,
-        });
+      const profile = await getFarcasterProfile(cleanUsername, false);
+      if (profile?.fid) {
+        return NextResponse.json(buildTrustResponse(profile), { headers: CORS_HEADERS });
       }
     }
-    
-    // ========== TIDAK DITEMUKAN ==========
-    return NextResponse.json({
-      notFound: true,
-      query: trimmedQuery,
-      message: `No results found for "${trimmedQuery}"`,
-    });
-    
+
+    // ── Tidak ditemukan ────────────────────────────────────────────────────
+    return NextResponse.json(
+      { notFound: true, query: trimmed, message: `No results for "${trimmed}"` },
+      { headers: CORS_HEADERS }
+    );
+
   } catch (error) {
-    console.error('Search error:', error);
-    return NextResponse.json({ 
-      error: 'Search failed', 
-      details: error.message,
-      notFound: true,
-      query: query,
-    }, { status: 500 });
+    console.error('Search route error:', error);
+    return NextResponse.json(
+      { error: 'Search failed', details: error.message, notFound: true },
+      { status: 500, headers: CORS_HEADERS }
+    );
   }
 }

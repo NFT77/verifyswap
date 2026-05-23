@@ -6,6 +6,18 @@ import { executeDirectSwap } from '@/lib/api/uniswap';
 // FEE RECIPIENT ADDRESS
 const FEE_RECIPIENT_BASE = '0x462be091Ef7Cfae820bb032a3cf2729fcAaD6e47';
 
+// ✅ CORS headers wajib untuk Mini App Farcaster
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+// ✅ OPTIONS handler untuk preflight request
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
 // Helper function to convert BigInt to string in objects
 function serializeBigInt(obj) {
   if (obj === null || obj === undefined) return obj;
@@ -22,7 +34,17 @@ function serializeBigInt(obj) {
 }
 
 export async function POST(request) {
-  const body = await request.json();
+  // ✅ Validasi body sebelum parse
+  let body;
+  try {
+    body = await request.json();
+  } catch (error) {
+    return NextResponse.json(
+      { error: 'Invalid request body — must be JSON' },
+      { status: 400, headers: CORS_HEADERS }
+    );
+  }
+
   const { 
     chain, 
     tokenIn, 
@@ -38,7 +60,7 @@ export async function POST(request) {
   if (!chain || !tokenOut || !amount) {
     return NextResponse.json(
       { error: 'Missing parameters: chain, tokenOut, amount are required' },
-      { status: 400 }
+      { status: 400, headers: CORS_HEADERS }
     );
   }
 
@@ -46,14 +68,14 @@ export async function POST(request) {
   if (chain !== 'base') {
     return NextResponse.json(
       { error: `Unsupported chain: ${chain}. Only base is supported` },
-      { status: 400 }
+      { status: 400, headers: CORS_HEADERS }
     );
   }
 
   if (!userAddress) {
     return NextResponse.json(
       { error: 'Missing userAddress parameter' },
-      { status: 400 }
+      { status: 400, headers: CORS_HEADERS }
     );
   }
 
@@ -62,7 +84,7 @@ export async function POST(request) {
     if (isNaN(amountNum) || amountNum <= 0) {
       return NextResponse.json(
         { error: 'Invalid amount: must be a positive number' },
-        { status: 400 }
+        { status: 400, headers: CORS_HEADERS }
       );
     }
 
@@ -119,7 +141,7 @@ export async function POST(request) {
             feeRecipient: feeRecipient,
           },
           message: `✅ Swap ${amountAfterFee} ${tokenIn === 'ETH' ? 'ETH' : 'tokens'} → ${tokenOut} via OKX. Fee ${feePercent}% (${feeAmount.toFixed(6)} ETH)`,
-        }));
+        }), { headers: CORS_HEADERS });
       }
     } catch (okxError) {
       console.error('⚠️ OKX swap failed:', okxError.message);
@@ -167,7 +189,7 @@ export async function POST(request) {
               feeRecipient,
             },
             message: `✅ Swapping via ${usedRouter}. Fee ${feePercent}% (${feeAmount.toFixed(6)} ETH)`,
-          }));
+          }), { headers: CORS_HEADERS });
         } else if (directResult.error) {
           throw new Error(directResult.error);
         }
@@ -182,21 +204,21 @@ export async function POST(request) {
               uniswapError: uniswapError.message,
             }
           },
-          { status: 500 }
+          { status: 500, headers: CORS_HEADERS }
         );
       }
     }
     
     return NextResponse.json(
       { error: result?.error || 'All swap routers failed' },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
 
   } catch (error) {
     console.error('Swap execution error:', error);
     return NextResponse.json(
       { success: false, error: error.message || 'Internal server error' },
-      { status: 500 }
+      { status: 500, headers: CORS_HEADERS }
     );
   }
 }
