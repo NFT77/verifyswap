@@ -1,3 +1,6 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import { Providers } from './providers';
 import './globals.css';
 
@@ -92,7 +95,31 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   const baseUrl = 'https://verifyswap.vercel.app';
-  
+  const [isFarcasterReady, setIsFarcasterReady] = useState(false);
+
+  // ============ FARCASTER MINI APP INITIALIZATION (WAJIB) ============
+  useEffect(() => {
+    const initFarcaster = async () => {
+      try {
+        const { sdk } = await import('@farcaster/miniapp-sdk');
+        const context = await sdk.context;
+        
+        if (context?.user?.fid) {
+          // WAJIB: Beri tahu Warpcast bahwa app sudah siap
+          // Tanpa ini, splash screen tidak akan hilang dan transaksi tidak bisa dimulai
+          await sdk.actions.ready();
+          console.log('✅ Farcaster Mini App ready, FID:', context.user.fid);
+        }
+      } catch (error) {
+        console.log('Not in Farcaster environment:', error);
+      } finally {
+        setIsFarcasterReady(true);
+      }
+    };
+    
+    initFarcaster();
+  }, []);
+
   // Konfigurasi untuk Farcaster Mini App Embed (v2)
   const miniAppEmbed = {
     version: '2',
@@ -112,7 +139,7 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* Farcaster Mini App Meta Tags - Gunakan fc:frame untuk kompatibilitas maksimal */}
+        {/* Farcaster Mini App Meta Tags */}
         <meta name="fc:frame" content={JSON.stringify(miniAppEmbed)} />
         
         {/* Frame v2 specific tags */}
@@ -121,7 +148,7 @@ export default function RootLayout({ children }) {
         <meta property="fc:frame:button:1:action" content="link" />
         <meta property="fc:frame:button:1:target" content={baseUrl} />
         
-        {/* Open Graph fallback untuk sosial media lain */}
+        {/* Open Graph fallback */}
         <meta property="og:title" content="VerifySwap - The Safest Way to Swap on Base" />
         <meta property="og:description" content="Real-time scam detection, honeypot checker, and Farcaster trust scores. Only 0.3% fee." />
         <meta property="og:image" content={`${baseUrl}/og-image.png`} />
@@ -137,7 +164,7 @@ export default function RootLayout({ children }) {
         <meta name="twitter:site" content="@verifyswap" />
         <meta name="twitter:creator" content="@verifyswap" />
         
-        {/* Additional Farcaster frame tag for compatibility */}
+        {/* Additional Farcaster frame tag */}
         <meta property="fc:frame:post_url" content={`${baseUrl}/api/frame`} />
         
         {/* Preconnect and DNS Prefetch */}
