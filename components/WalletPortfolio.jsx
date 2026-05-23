@@ -12,6 +12,7 @@ const POPULAR_TOKENS = {
     address: 'ETH',
     logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/info/logo.png',
     decimals: 18,
+    priceUSD: 3200,
   },
   USDC: {
     symbol: 'USDC',
@@ -19,13 +20,15 @@ const POPULAR_TOKENS = {
     address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913/logo.png',
     decimals: 6,
+    priceUSD: 1,
   },
   WBTC: {
     symbol: 'WBTC',
     name: 'Wrapped Bitcoin',
     address: '0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C',
-    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C/logo.png',
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599/logo.png', // ✅ Fixed WBTC logo URL
     decimals: 8,
+    priceUSD: 65000,
   },
   WETH: {
     symbol: 'WETH',
@@ -33,6 +36,7 @@ const POPULAR_TOKENS = {
     address: '0x4200000000000000000000000000000000000006',
     logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x4200000000000000000000000000000000000006/logo.png',
     decimals: 18,
+    priceUSD: 3200,
   },
 };
 
@@ -175,11 +179,8 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
         const balanceRaw = parseInt(result.result, 16);
         const balance = balanceRaw / Math.pow(10, token.decimals);
         
-        // Get price based on token
-        let priceUSD = 0;
-        if (token.symbol === 'USDC') priceUSD = 1;
-        else if (token.symbol === 'WBTC') priceUSD = 65000;
-        else if (token.symbol === 'WETH') priceUSD = 3200;
+        // Use price from token object
+        const priceUSD = token.priceUSD || 0;
         
         results[token.symbol] = {
           balance,
@@ -263,7 +264,7 @@ export default function WalletPortfolio({ network = 'base', refreshTrigger = 0, 
 
   // Token display order
   const tokenOrder = ['ETH', 'USDC', 'WBTC', 'WETH'];
-  const displayTokens = tokenOrder.filter(symbol => balances[symbol]);
+  const displayTokens = tokenOrder.filter(symbol => balances[symbol] && balances[symbol].balance > 0);
 
   return (
     <div className="bg-gradient-to-br from-slate-800/50 to-slate-900/50 backdrop-blur-xl rounded-2xl border border-white/10 p-4">

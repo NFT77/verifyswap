@@ -52,7 +52,7 @@ const POPULAR_TOKENS = {
     symbol: 'WBTC',
     name: 'Wrapped Bitcoin',
     address: '0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C',
-    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/base/assets/0x0555E30da8f98308EdB960aa94C0Db5B0C2B318C/logo.png',
+    logo: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599/logo.png',
     decimals: 8,
     priceUSD: 65000,
   },
@@ -93,14 +93,25 @@ export default function SwapWidget({ token, onSuccess }) {
   const [selectedRoute, setSelectedRoute] = useState(null);
   const [selectedRouterAddress, setSelectedRouterAddress] = useState(null);
 
-  // Update receive token when token prop changes
+  // Update receive token when token prop changes (dari search result)
   useEffect(() => {
     if (token && token.address) {
+      // Cari di popular tokens
       const foundToken = Object.values(POPULAR_TOKENS).find(
         t => t.address === token.address || t.symbol === token.symbol
       );
       if (foundToken) {
         setReceiveToken(foundToken);
+      } else {
+        // ✅ Token custom dari search result (address apapun bisa swap)
+        setReceiveToken({
+          symbol: token.symbol,
+          name: token.name || token.symbol,
+          address: token.address,
+          logo: token.logo || null,
+          decimals: token.decimals || 18,
+          priceUSD: token.priceUSD || 0,
+        });
       }
     }
   }, [token]);
@@ -418,17 +429,17 @@ export default function SwapWidget({ token, onSuccess }) {
   const priceImpact = quote?.priceImpact || 0;
   const swapFee = amountNum * 0.003;
   
-  const payValueUSD = amountNum * payToken.priceUSD;
-  const receiveValueUSD = estimatedOutput * receiveToken.priceUSD;
+  const payValueUSD = amountNum * (payToken.priceUSD || 0);
+  const receiveValueUSD = estimatedOutput * (receiveToken.priceUSD || 0);
 
   const isButtonDisabled = !amountNum || amountNum <= 0 || !hasQuote || isExecuting || !isConnected;
 
   const getSlippageWarning = useCallback(() => {
     if (slippage >= 5) {
-      return { text: '⚠️ VERY HIGH SLIPPAGE! Only use for extremely volatile tokens. You may lose significant value.', color: 'text-red-400 bg-red-500/10 border-red-500/20' };
+      return { text: '⚠️ VERY HIGH SLIPPAGE! Only use for extremely volatile tokens.', color: 'text-red-400 bg-red-500/10 border-red-500/20' };
     }
     if (slippage >= 3) {
-      return { text: '⚠️ High slippage. Protect yourself by setting a lower value.', color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20' };
+      return { text: '⚠️ High slippage. Consider a lower value.', color: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20' };
     }
     if (slippage <= 0.3) {
       return { text: '✅ Low slippage is safe, but may fail in volatile markets.', color: 'text-green-400 bg-green-500/10 border-green-500/20' };
@@ -441,11 +452,12 @@ export default function SwapWidget({ token, onSuccess }) {
   const TokenSelector = () => (
     <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
       <div className="bg-slate-800 rounded-2xl w-full max-w-md max-h-[80vh] overflow-hidden">
-        <div className="p-4 border-b border-white/10 flex justify-between items-center">
+        <div className="p-4 border-b border-white/10 flex justify-between items-center sticky top-0 bg-slate-800">
           <h3 className="text-lg font-semibold text-white">Select a token</h3>
           <button onClick={() => setIsTokenSelectorOpen(false)} className="text-gray-400 hover:text-white text-xl">✕</button>
         </div>
         <div className="p-2 max-h-[60vh] overflow-y-auto">
+          <div className="text-xs text-gray-500 px-3 py-2">Popular</div>
           {Object.values(POPULAR_TOKENS).map((t) => (
             <button
               key={t.symbol}
@@ -461,7 +473,7 @@ export default function SwapWidget({ token, onSuccess }) {
                 <div className="text-xs text-gray-400">{t.name}</div>
               </div>
               <div className="text-right">
-                <div className="text-sm text-white">${t.priceUSD.toLocaleString()}</div>
+                <div className="text-sm text-white">${t.priceUSD?.toLocaleString()}</div>
               </div>
             </button>
           ))}
@@ -471,24 +483,24 @@ export default function SwapWidget({ token, onSuccess }) {
   );
 
   return (
-    <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-5">
+    <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-4 overflow-x-hidden">
       {isTokenSelectorOpen && <TokenSelector />}
 
       {swapError && (
-        <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl">
+        <div className="mb-3 p-3 bg-red-500/20 border border-red-500/30 rounded-xl">
           <p className="text-red-400 text-sm whitespace-pre-line">{swapError}</p>
           <button onClick={() => setSwapError('')} className="text-xs text-red-300 mt-1 underline">Dismiss</button>
         </div>
       )}
 
       {swapSuccess && (
-        <div className="mb-4 p-3 bg-green-500/20 border border-green-500/30 rounded-xl">
+        <div className="mb-3 p-3 bg-green-500/20 border border-green-500/30 rounded-xl">
           <p className="text-green-400 text-sm">✅ {swapSuccess}</p>
         </div>
       )}
 
       {showRetry && (
-        <div className="mb-4 p-3 bg-yellow-500/20 border border-yellow-500/30 rounded-xl">
+        <div className="mb-3 p-3 bg-yellow-500/20 border border-yellow-500/30 rounded-xl">
           <p className="text-yellow-400 text-sm mb-2">⚠️ Price moved. Retry with {retrySlippage}% slippage?</p>
           <div className="flex gap-2">
             <button onClick={handleRetry} className="px-3 py-1 bg-yellow-500 text-black rounded-lg text-sm font-medium">Retry</button>
@@ -500,46 +512,71 @@ export default function SwapWidget({ token, onSuccess }) {
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="text-sm font-medium text-white">Swap</div>
-        {selectedRoute && <span className="text-xs bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">⚡ Route: {selectedRoute.dexName}</span>}
-        {status === 'reconnecting' && <span className="text-xs bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full animate-pulse">🔄 Reconnecting wallet...</span>}
+        {selectedRoute && <span className="text-xs bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">⚡ {selectedRoute.dexName}</span>}
+        {status === 'reconnecting' && <span className="text-xs bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full animate-pulse">🔄 Reconnecting...</span>}
       </div>
 
-      {/* You Pay */}
-      <div className="p-4 rounded-xl bg-black/30 mb-2">
+      {/* You Pay - FIXED MOBILE LAYOUT */}
+      <div className="p-3 rounded-xl bg-black/30 mb-2">
         <div className="flex justify-between items-center mb-2">
           <span className="text-sm text-gray-400">You pay</span>
           <span className="text-xs text-gray-500">Balance: --</span>
         </div>
-        <div className="flex items-center gap-3">
-          <button onClick={() => { setSelectorMode('pay'); setIsTokenSelectorOpen(true); }} disabled={isExecuting} className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 transition disabled:opacity-50">
-            <div className="w-6 h-6 rounded-full overflow-hidden"><img src={payToken.logo} alt={payToken.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} /></div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button 
+            onClick={() => { setSelectorMode('pay'); setIsTokenSelectorOpen(true); }} 
+            disabled={isExecuting} 
+            className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 transition disabled:opacity-50 flex-shrink-0"
+          >
+            <div className="w-6 h-6 rounded-full overflow-hidden flex-shrink-0">
+              <img src={payToken.logo} alt={payToken.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} />
+            </div>
             <span className="font-medium text-white">{payToken.symbol}</span>
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+            <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
           </button>
-          <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.0" disabled={isExecuting} className="flex-1 bg-transparent text-2xl text-white text-right outline-none disabled:opacity-50" />
+          <div className="flex-1 min-w-[100px]">
+            <input 
+              type="number" 
+              value={amount} 
+              onChange={(e) => setAmount(e.target.value)} 
+              placeholder="0.0" 
+              disabled={isExecuting} 
+              className="w-full bg-transparent text-xl text-white text-right outline-none disabled:opacity-50"
+            />
+          </div>
         </div>
         <div className="text-right text-xs text-gray-500 mt-1">≈ ${payValueUSD.toFixed(2)}</div>
       </div>
 
       {/* Switch Button */}
       <div className="flex justify-center -my-2 relative z-10">
-        <button onClick={handleSwitchTokens} disabled={isExecuting} className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center text-white text-sm hover:bg-purple-500 transition disabled:opacity-50">↓↑</button>
+        <button onClick={handleSwitchTokens} disabled={isExecuting} className="w-7 h-7 bg-purple-600 rounded-full flex items-center justify-center text-white text-xs hover:bg-purple-500 transition disabled:opacity-50">↓↑</button>
       </div>
 
       {/* You Receive */}
-      <div className="p-4 rounded-xl bg-black/30 mb-4">
+      <div className="p-3 rounded-xl bg-black/30 mb-3">
         <div className="flex justify-between items-center mb-2">
           <span className="text-sm text-gray-400">You receive (estimated)</span>
         </div>
-        <div className="flex items-center gap-3">
-          <button onClick={() => { setSelectorMode('receive'); setIsTokenSelectorOpen(true); }} disabled={isExecuting} className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 transition disabled:opacity-50">
-            <div className="w-6 h-6 rounded-full overflow-hidden"><img src={receiveToken.logo} alt={receiveToken.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} /></div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button 
+            onClick={() => { setSelectorMode('receive'); setIsTokenSelectorOpen(true); }} 
+            disabled={isExecuting} 
+            className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20 transition disabled:opacity-50 flex-shrink-0"
+          >
+            <div className="w-6 h-6 rounded-full overflow-hidden flex-shrink-0">
+              <img src={receiveToken.logo} alt={receiveToken.symbol} className="w-full h-full object-cover" onError={(e) => { e.target.style.display = 'none'; }} />
+            </div>
             <span className="font-medium text-white">{receiveToken.symbol}</span>
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+            <svg className="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
           </button>
           <div className="flex-1 text-right">
-            <div className="text-2xl text-white font-mono">
-              {isGettingQuote ? <span className="text-gray-400 text-base animate-pulse">...</span> : estimatedOutput.toFixed(6)}
+            <div className="text-xl text-white font-mono">
+              {isGettingQuote ? <span className="text-gray-400 text-sm animate-pulse">...</span> : estimatedOutput.toFixed(6)}
             </div>
             <div className="text-xs text-green-400 mt-1">≈ ${receiveValueUSD.toFixed(2)}</div>
           </div>
@@ -548,63 +585,63 @@ export default function SwapWidget({ token, onSuccess }) {
 
       {/* DETAIL SWAP INFO */}
       {hasQuote && amountNum > 0 && !isGettingQuote && (
-        <div className="mb-4 p-3 rounded-xl bg-black/30 border border-white/10">
+        <div className="mb-3 p-3 rounded-xl bg-black/30 border border-white/10">
           <div className="space-y-2 text-sm">
             <div className="flex justify-between items-center">
               <span className="text-gray-400">Rate</span>
               <span className="text-white">1 {payToken.symbol} = {rate.toFixed(6)} {receiveToken.symbol}</span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-gray-400">Minimum Received</span>
-              <span className="text-white">{minimumReceived.toFixed(6)} {receiveToken.symbol} <span className="text-gray-500 text-xs ml-1">(slippage {slippage}%)</span></span>
+              <span className="text-gray-400">Min. Received</span>
+              <span className="text-white">{minimumReceived.toFixed(6)} {receiveToken.symbol} <span className="text-gray-500 text-xs">(slippage {slippage}%)</span></span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-gray-400">Price Impact</span>
               <span className={priceImpact > 5 ? 'text-red-400' : priceImpact > 2 ? 'text-yellow-400' : 'text-green-400'}>{priceImpact.toFixed(2)}%</span>
             </div>
             <div className="flex justify-between items-center pt-2 border-t border-white/10">
-              <span className="text-gray-400">Est. Swap Fee</span>
-              <span className="text-white">{swapFee.toFixed(6)} {payToken.symbol} <span className="text-gray-500 text-xs ml-1">(0.3% fee)</span></span>
+              <span className="text-gray-400">Swap Fee (0.3%)</span>
+              <span className="text-white">{swapFee.toFixed(6)} {payToken.symbol}</span>
             </div>
           </div>
         </div>
       )}
 
       {/* SLIPPAGE SECTION */}
-      <div className="mb-4">
+      <div className="mb-3">
         <div className="flex justify-between items-center mb-2">
           <span className="text-sm font-medium text-white">Slippage Tolerance</span>
           <span className={`text-xs ${slippage > 3 ? 'text-red-400' : slippage > 1 ? 'text-yellow-400' : 'text-green-400'}`}>{slippage}%</span>
         </div>
-        <div className="flex gap-2 flex-wrap mb-2">
+        <div className="flex gap-2 flex-wrap">
           {slippageOptions.map((s) => (
             <button key={s} onClick={() => handlePresetSlippage(s)} disabled={isExecuting} className={`px-3 py-1.5 rounded-lg text-sm transition ${slippage === s && !isCustomSlippage ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white' : 'bg-white/10 text-gray-300 hover:bg-white/20'} disabled:opacity-50`}>{s}%</button>
           ))}
           <input type="number" step="0.1" min="0" max="50" value={isCustomSlippage ? slippage : ''} onChange={(e) => handleCustomSlippage(e.target.value)} placeholder="Custom" disabled={isExecuting} className="w-20 px-2 py-1.5 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center outline-none focus:border-purple-500 disabled:opacity-50" />
         </div>
-        {slippageWarning && <div className={`p-2 rounded-lg text-xs ${slippageWarning.color}`}>{slippageWarning.text}</div>}
+        {slippageWarning && <div className={`mt-2 p-2 rounded-lg text-xs ${slippageWarning.color}`}>{slippageWarning.text}</div>}
       </div>
 
-      {/* WARNING */}
-      <div className="mb-4 p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-center">
-        <p className="text-yellow-400 text-xs">⚠️ Double-check all details before confirming. Crypto transactions are irreversible.</p>
+      {/* Warning */}
+      <div className="mb-3 p-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-center">
+        <p className="text-yellow-400 text-xs">⚠️ Double-check details. Transactions are irreversible.</p>
       </div>
 
       {!isConnected && amountNum > 0 && hasQuote && (
-        <div className="mb-4 p-2 rounded-lg bg-blue-500/20 border border-blue-500/20 text-center">
-          <p className="text-blue-400 text-xs">🔌 Connect wallet above to execute this swap</p>
+        <div className="mb-3 p-2 rounded-lg bg-blue-500/20 border border-blue-500/20 text-center">
+          <p className="text-blue-400 text-xs">🔌 Connect wallet to swap</p>
         </div>
       )}
 
       {txHash && (
-        <div className="mb-4 p-2 bg-green-500/20 rounded-lg text-center">
+        <div className="mb-3 p-2 bg-green-500/20 rounded-lg text-center">
           <p className="text-green-400 text-xs">Transaction sent!</p>
           <a href={`https://basescan.org/tx/${txHash}`} target="_blank" rel="noopener noreferrer" className="text-green-300 text-xs font-mono break-all hover:underline">{txHash.slice(0, 10)}...{txHash.slice(-8)}</a>
         </div>
       )}
 
       {(isGettingQuote || isExecuting) && (
-        <div className="mb-4 p-2 bg-blue-500/20 rounded-lg text-center">
+        <div className="mb-3 p-2 bg-blue-500/20 rounded-lg text-center">
           <div className="flex items-center justify-center gap-2">
             <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
             <p className="text-blue-400 text-xs">{isGettingQuote ? 'Getting best price...' : 'Executing swap...'}</p>
@@ -612,6 +649,7 @@ export default function SwapWidget({ token, onSuccess }) {
         </div>
       )}
 
+      {/* Swap Button */}
       <button onClick={handleBaseSwap} disabled={isButtonDisabled || status === 'reconnecting'} className={`w-full py-4 rounded-xl font-semibold transition ${!isButtonDisabled && status !== 'reconnecting' ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:opacity-90 active:scale-[0.98]' : 'bg-white/10 text-gray-400 cursor-not-allowed'}`}>
         {status === 'reconnecting' ? '🔄 Reconnecting wallet...' :
          !isConnected && amountNum > 0 && hasQuote ? 'Connect Wallet to Swap' :
