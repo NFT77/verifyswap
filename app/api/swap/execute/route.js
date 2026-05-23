@@ -1,9 +1,12 @@
 // app/api/swap/execute/route.js
-import { NextResponse } from 'next/server';
-import { executeOkxSwap } from '@/lib/api/okx';
-import { executeDirectSwap } from '@/lib/api/uniswap';
+// Powered by 0x API v2 permit2 — OKX and Uniswap removed entirely
 
-const FEE_RECIPIENT_BASE = '0x462be091Ef7Cfae820bb032a3cf2729fcAaD6e47';
+import { NextResponse } from 'next/server';
+import { getZeroxQuote, getTokenDecimals } from '@/lib/api/zerox';
+
+const FEE_RECIPIENT = '0x462be091Ef7Cfae820bb032a3cf2729fcAaD6e47';
+const FEE_PERCENT = 0.3;
+const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -36,42 +39,23 @@ export async function POST(request) {
     body = await request.json();
   } catch {
     return NextResponse.json(
-      { error: 'Invalid request body — must be valid JSON' },
+      { error: 'Invalid JSON body' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
-  const {
-    chain,
-    tokenIn,
-    tokenOut,
-    amount,
-    slippage,
-    userAddress,
-    selectedRouterAddress,
-    selectedDexName,
-    // ✅ NEW: receive the quoted output amount from client so we can pass it
-    // to executeDirectSwap for correct amountOutMinimum calculation
-    quoteAmountOut,
-  } = body;
+  const { chain, tokenIn, tokenOut, amount, slippage, userAddress } = body;
 
-  if (!chain || !tokenOut || !amount) {
+  if (!chain || !tokenIn || !tokenOut || !amount || !userAddress) {
     return NextResponse.json(
-      { error: 'Missing parameters: chain, tokenOut, amount are required' },
+      { error: 'Missing required parameters: chain, tokenIn, tokenOut, amount, userAddress' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
   if (chain !== 'base') {
     return NextResponse.json(
-      { error: `Unsupported chain: ${chain}` },
-      { status: 400, headers: CORS_HEADERS }
-    );
-  }
-
-  if (!userAddress) {
-    return NextResponse.json(
-      { error: 'Missing userAddress parameter' },
+      { error: 'Only base chain is supported' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
@@ -79,135 +63,74 @@ export async function POST(request) {
   const amountNum = parseFloat(amount);
   if (isNaN(amountNum) || amountNum <= 0) {
     return NextResponse.json(
-      { error: 'Invalid amount: must be a positive number' },
+      { error: 'Invalid amount' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
+  const slippagePercent = parseFloat(slippage) || 0.5;
+
+  // Platform fee deducted from sell amount
+  const feeAmount = amountNum * (FEE_PERCENT / 100);
+  const amountAfterFee = amountNum - feeAmount;
+
+  // Resolve ETH → WETH for 0x API
+  const resolvedTokenIn = tokenIn === 'ETH' ? WETH_ADDRESS : tokenIn;
+
+  console.log(`0x Swap: ${amountAfterFee} ${tokenIn} → ${tokenOut} | user: ${userAddress}`);
+  console.log(`Fee: ${feeAmount} (${FEE_PERCENT}%) → ${FEE_RECIPIENT}`);
+
   try {
-    const slippagePercent = parseFloat(slippage) || 0.5;
-    const feePercent = 0.3;
-    const feeAmount = amountNum * (feePercent / 100);
-    const amountAfterFee = amountNum - feeAmount;
-    const feeRecipient = FEE_RECIPIENT_BASE;
+    // Get firm quote with permit2 transaction data
+    const quote = await getZeroxQuote({
+      tokenIn: resolvedTokenIn,
+      tokenOut,
+      amount: amountAfterFee,
+      slippage: slippagePercent,
+      taker: userAddress,
+    });
 
-    console.log(`💰 SWAP EXECUTION on BASE`);
-    console.log(`💰 Amount: ${amountNum} | After fee: ${amountAfterFee} | Fee: ${feeAmount}`);
-    console.log(`💰 User: ${userAddress} | Token out: ${tokenOut}`);
-    console.log(`💰 Quote amount out: ${quoteAmountOut}`);
-
-    // --- Priority 1: OKX DEX Aggregator ---
-    let result = null;
-    try {
-      result = await Promise.race([
-        executeOkxSwap({
-          chain: 'base',
-          tokenIn: tokenIn === 'ETH' ? 'ETH' : tokenIn,
-          tokenOut,
-          amount: amountAfterFee,
-          slippage: slippagePercent,
-          userAddress,
-          feePercent,
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('OKX timeout (15s)')), 15000)),
-      ]);
-
-      if (result?.success) {
-        console.log('✅ OKX swap execution prepared');
-        return NextResponse.json(
-          serializeBigInt({
-            success: true,
-            transaction: result.transaction,
-            txHash: result.txHash,
-            usedRouter: 'OKX DEX Aggregator',
-            feeAmount: result.feeAmount || feeAmount,
-            feeRecipient: result.feeRecipient || feeRecipient,
-            quote: {
-              amountIn: amountAfterFee,
-              amountOut: result.toTokenAmount || 'unknown',
-              feeAmount,
-              feeRecipient,
-            },
-            message: `✅ Swap ${amountAfterFee} via OKX. Fee ${feePercent}% (${feeAmount.toFixed(6)} ETH)`,
-          }),
-          { headers: CORS_HEADERS }
-        );
-      }
-    } catch (okxError) {
-      console.error('OKX swap failed:', okxError.message);
-      result = { success: false, error: okxError.message };
-    }
-
-    // --- Priority 2: Uniswap V3 Direct ---
-    console.log('OKX failed, falling back to Uniswap V3 Direct');
-    const usedRouter = selectedDexName || 'Uniswap V3 Direct';
-
-    try {
-      const deadline = Math.floor(Date.now() / 1000) + 1200;
-
-      // ✅ FIXED: pass quoteAmountOut so executeDirectSwap can calculate
-      // amountOutMinimum correctly for tokens with non-18 decimals (e.g. USDC = 6)
-      const directResult = await Promise.race([
-        executeDirectSwap({
-          tokenIn: tokenIn === 'ETH' ? 'ETH' : tokenIn,
-          tokenOut,
-          amount: amountAfterFee,
-          slippage: slippagePercent,
-          recipient: userAddress,
-          deadline,
-          routerAddress: selectedRouterAddress,
-          quoteAmountOut: quoteAmountOut ? parseFloat(quoteAmountOut) : undefined,
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Uniswap timeout (15s)')), 15000)),
-      ]);
-
-      if (directResult?.success && directResult?.needsOnChain) {
-        return NextResponse.json(
-          serializeBigInt({
-            success: true,
-            needsOnChain: true,
-            transaction: directResult.transaction,
-            usedRouter,
-            feeAmount,
-            feeRecipient,
-            routerAddress: selectedRouterAddress || directResult.routerAddress,
-            quote: {
-              amountIn: amountAfterFee,
-              amountOut: directResult.amountOutMin || 'estimated',
-              feeAmount,
-              feeRecipient,
-            },
-            message: `✅ Swapping via ${usedRouter}. Fee ${feePercent}% (${feeAmount.toFixed(6)} ETH)`,
-          }),
-          { headers: CORS_HEADERS }
-        );
-      }
-
-      if (directResult?.error) throw new Error(directResult.error);
-
-    } catch (uniswapError) {
-      console.error('Uniswap swap failed:', uniswapError.message);
+    if (!quote || !quote.success) {
       return NextResponse.json(
-        {
-          error: `All routers failed. OKX: ${result?.error || 'unavailable'}, Uniswap: ${uniswapError.message}`,
-          details: {
-            okxError: result?.error,
-            uniswapError: uniswapError.message,
-          },
-        },
+        { error: '0x API failed to return a firm quote. Please try again.' },
         { status: 500, headers: CORS_HEADERS }
       );
     }
 
+    if (!quote.transaction) {
+      return NextResponse.json(
+        { error: '0x did not return transaction data. Please try again.' },
+        { status: 500, headers: CORS_HEADERS }
+      );
+    }
+
+    // Return transaction + permit2 data to client for wallet signing
     return NextResponse.json(
-      { error: result?.error || 'All swap routers failed. Please try again.' },
-      { status: 500, headers: CORS_HEADERS }
+      serializeBigInt({
+        success: true,
+        // The client should:
+        // 1. If quote.approval exists → send approval tx first
+        // 2. If quote.permit2 exists → sign the permit2 message
+        // 3. Send quote.transaction via wallet
+        transaction: quote.transaction,
+        permit2: quote.permit2 || null,
+        approval: quote.approval || null,
+        buyAmount: quote.buyAmount,
+        buyAmountRaw: quote.buyAmountRaw,
+        outDecimals: quote.outDecimals,
+        feeAmount,
+        feePercent: FEE_PERCENT,
+        feeRecipient: FEE_RECIPIENT,
+        source: '0x',
+        message: `Swap ${amountAfterFee} ${tokenIn} → ${tokenOut} via 0x. Fee: ${FEE_PERCENT}% (${feeAmount.toFixed(6)})`,
+      }),
+      { headers: CORS_HEADERS }
     );
 
   } catch (error) {
-    console.error('Swap execution unhandled error:', error);
+    console.error('Execute route error:', error);
     return NextResponse.json(
-      { success: false, error: error.message || 'Internal server error' },
+      { error: error.message || 'Internal server error' },
       { status: 500, headers: CORS_HEADERS }
     );
   }
