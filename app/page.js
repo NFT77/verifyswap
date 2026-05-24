@@ -121,8 +121,14 @@ export default function Home() {
   // ✅ TrendingTokens calls handleSearch(token.address) — this is fine
   // because TrendingTokens logo fetches now go directly to /api/search
   // internally (fixed in TrendingTokens.jsx) and do NOT call this handler.
-  const handleTrendingTokenSelect = useCallback((token) => {
-    handleSearch(token.address);
+  const handleTrendingTokenSelect = useCallback((query) => {
+      if (query && typeof query === 'string' && query.trim()) {
+      handleSearch(query.trim());
+    } else if (query?.address) {
+    handleSearch(query.address);
+    } else if (query?.symbol) {
+      handleSearch(query.symbol);
+    }
   }, [handleSearch]);
 
   const handleTokenSelect = useCallback((token) => {

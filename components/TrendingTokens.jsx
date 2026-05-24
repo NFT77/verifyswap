@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import TokenIcon from './TokenIcon';
 
-// Safe fetch with timeout — optimized for Farcaster iframe
 async function fetchWithTimeout(url, ms = 10000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ms);
@@ -25,19 +24,16 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [logos, setLogos] = useState({});
 
-  // Track mounted state — prevents state updates after unmount
   const isMounted = useRef(true);
   useEffect(() => {
     isMounted.current = true;
     return () => { isMounted.current = false; };
   }, []);
 
-  // Fetch logos in batch after trending loads
   const fetchLogosForTokens = useCallback(async (tokens) => {
     const tokensNeedingLogo = tokens.filter(t => t.address && !logos[t.address]);
     if (tokensNeedingLogo.length === 0) return;
 
-    // Fetch all logos in parallel with a cap of 5 concurrent requests
     const chunks = [];
     for (let i = 0; i < tokensNeedingLogo.length; i += 5) {
       chunks.push(tokensNeedingLogo.slice(i, i + 5));
@@ -54,7 +50,7 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
               setLogos(prev => ({ ...prev, [token.address]: data.token.logo }));
             }
           } catch {
-            // silently skip failed logo fetches
+            // silent
           }
         })
       );
@@ -68,17 +64,13 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
 
     try {
       const res = await fetchWithTimeout(`/api/trending?chain=base&limit=${limit}`, 10000);
-
       if (!res.ok) throw new Error(`API error ${res.status}`);
-
       const data = await res.json();
-
       if (!isMounted.current) return;
 
       if (data.success && Array.isArray(data.trending)) {
         setTrending(data.trending);
         setLastUpdated(data.timestamp);
-        // Fetch logos separately — don't block render
         fetchLogosForTokens(data.trending);
       } else {
         setError('Failed to load trending tokens');
@@ -113,23 +105,20 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
 
   const handleTokenClick = (token) => {
     if (!onSelectToken) return;
-    onSelectToken(token.address ? token : { ...token, address: token.symbol });
+    if (token.address && token.address !== 'undefined' && token.address !== 'null') {
+      onSelectToken(token.address);
+    } else if (token.symbol) {
+      onSelectToken(token.symbol);
+    }
   };
 
-  // Get status label based on source
   const getStatusLabel = () => {
     const source = trending[0]?.source;
-    if (source === 'real-fallback') {
+    if (source === 'real-fallback' || source === 'dexscreener') {
       return { text: 'Live Data', color: 'bg-green-500/20 text-green-400', icon: '✅' };
     }
     if (source === 'stale-cache') {
-      return { text: 'Cached (Updating...)', color: 'bg-yellow-500/20 text-yellow-400', icon: '⏳' };
-    }
-    if (source === 'geckoterminal' || source === 'dexscreener' || source === 'coingecko') {
-      return { text: 'Live', color: 'bg-green-500/20 text-green-400', icon: '🔥' };
-    }
-    if (source === 'cached') {
-      return { text: 'From Cache', color: 'bg-blue-500/20 text-blue-400', icon: '💾' };
+      return { text: 'Cached', color: 'bg-yellow-500/20 text-yellow-400', icon: '⏳' };
     }
     return null;
   };
@@ -165,10 +154,7 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
     return (
       <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-5 text-center">
         <p className="text-red-400 text-sm">{error}</p>
-        <button
-          onClick={fetchTrending}
-          className="mt-2 text-xs text-purple-400 hover:text-purple-300 transition"
-        >
+        <button onClick={fetchTrending} className="mt-2 text-xs text-purple-400 hover:text-purple-300 transition">
           Try again →
         </button>
       </div>
@@ -194,16 +180,11 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
             </span>
           )}
         </div>
-        <button
-          onClick={fetchTrending}
-          disabled={isLoading}
-          className="text-xs text-purple-400 hover:text-purple-300 transition disabled:opacity-50"
-        >
+        <button onClick={fetchTrending} disabled={isLoading} className="text-xs text-purple-400 hover:text-purple-300 transition disabled:opacity-50">
           {isLoading ? '⟳ Refreshing...' : '⟳ Refresh'}
         </button>
       </div>
 
-      {/* No motion.div — safe for Farcaster iframe */}
       <div className="space-y-2">
         {trending.map((token, idx) => (
           <div
@@ -245,7 +226,7 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
               <div className="font-mono text-white text-sm">
                 {token.priceUSD > 0
                   ? `$${token.priceUSD.toFixed(token.priceUSD < 0.01 ? 6 : 4)}`
-                  : token.priceUSD === 0 ? 'Loading...' : 'N/A'}
+                  : 'Loading...'}
               </div>
               <div className={`text-xs font-medium ${getPriceChangeColor(token.priceChange24h)}`}>
                 {token.priceChange24h > 0 ? '▲' : token.priceChange24h < 0 ? '▼' : ''}
@@ -260,21 +241,6 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
         <p className="text-xs text-gray-500">
           🔥 Click any token to instantly search and swap • Updated every 5 minutes
         </p>
-        {trending[0]?.source === 'stale-cache' && (
-          <p className="text-xs text-yellow-500/70 mt-1">
-            ⏳ Using cached data. Live data will appear momentarily.
-          </p>
-        )}
-        {trending[0]?.source === 'real-fallback' && (
-          <p className="text-xs text-green-500/70 mt-1">
-            ✅ Live token data • Updated every 5 minutes
-          </p>
-        )}
-        {trending[0]?.source === 'emergency' && (
-          <p className="text-xs text-blue-500/70 mt-1">
-            🔄 Loading real data from DexScreener...
-          </p>
-        )}
       </div>
     </div>
   );
