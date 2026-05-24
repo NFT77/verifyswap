@@ -1,7 +1,8 @@
-// 0x API Swap Quote Route - Fully working
+// app/api/swap/quote/route.js
+// Powered by 0x API v2 — OKX and Uniswap removed entirely
 
 import { NextResponse } from 'next/server';
-import { getZeroxQuote, getZeroxPrice, getTokenDecimals, WETH_ADDRESS } from '@/lib/api/zerox';
+import { getZeroxPrice, getTokenDecimals } from '@/lib/api/zerox';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -16,17 +17,15 @@ export async function OPTIONS() {
 }
 
 const quoteCache = new Map();
-const CACHE_TTL = 3000; // 3 seconds
+const CACHE_TTL = 5000; // 5 seconds
 
-function getCacheKey(tokenIn, tokenOut, amount, slippage, taker) {
-  return `base:${tokenIn}:${tokenOut}:${amount}:${slippage}:${taker || 'no-taker'}`;
+function getCacheKey(tokenIn, tokenOut, amount, slippage) {
+  return `base:${tokenIn}:${tokenOut}:${amount}:${slippage}`;
 }
 
 function getCachedQuote(key) {
   const cached = quoteCache.get(key);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data;
   quoteCache.delete(key);
   return null;
 }
@@ -39,26 +38,27 @@ function setCachedQuote(key, data) {
   quoteCache.set(key, { data, timestamp: Date.now() });
 }
 
+const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const chain = searchParams.get('chain');
-  let tokenIn = searchParams.get('tokenIn');
+  const tokenIn = searchParams.get('tokenIn');
   const tokenOut = searchParams.get('tokenOut');
   const amount = searchParams.get('amount');
   const slippage = parseFloat(searchParams.get('slippage') || '0.5');
   const taker = searchParams.get('taker') || undefined;
 
-  // Validation
-  if (!tokenOut || !amount) {
+  if (!chain || !tokenOut || !amount) {
     return NextResponse.json(
-      { error: 'Missing parameters: tokenOut, amount required' },
+      { error: 'Missing parameters: chain, tokenOut, amount required' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
   if (chain !== 'base') {
     return NextResponse.json(
-      { error: 'Only Base chain is supported' },
+      { error: 'Only base chain is supported' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
@@ -73,50 +73,40 @@ export async function GET(request) {
 
   if (isNaN(slippage) || slippage < 0 || slippage > 50) {
     return NextResponse.json(
-      { error: 'Invalid slippage (0-50)' },
+      { error: 'Invalid slippage' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
 
-  // Convert ETH to WETH for 0x API
-  if (tokenIn === 'ETH') {
-    tokenIn = WETH_ADDRESS;
-  }
-
-  if (!tokenIn || !tokenIn.startsWith('0x')) {
-    return NextResponse.json(
-      { error: 'Invalid tokenIn address' },
-      { status: 400, headers: CORS_HEADERS }
-    );
+  if (!tokenIn || (!tokenIn.startsWith('0x') && tokenIn !== 'ETH')) {
+    return NextResponse.json({ error: 'Invalid tokenIn' }, { status: 400, headers: CORS_HEADERS });
   }
 
   if (!tokenOut.startsWith('0x')) {
-    return NextResponse.json(
-      { error: 'Invalid tokenOut address' },
-      { status: 400, headers: CORS_HEADERS }
-    );
+    return NextResponse.json({ error: 'Invalid tokenOut' }, { status: 400, headers: CORS_HEADERS });
   }
 
-  const cacheKey = getCacheKey(tokenIn, tokenOut, amount, slippage, taker);
+  // Resolve ETH → WETH for 0x API
+  const resolvedTokenIn = tokenIn === 'ETH' ? WETH_ADDRESS : tokenIn;
+
+  const cacheKey = getCacheKey(resolvedTokenIn, tokenOut, amount, slippage);
   const cached = getCachedQuote(cacheKey);
   if (cached) {
     return NextResponse.json({ ...cached, cached: true }, { headers: CORS_HEADERS });
   }
 
   try {
-    // Get quote from 0x
-    const quote = await getZeroxQuote({
-      tokenIn: tokenIn,
-      tokenOut: tokenOut,
+    const quote = await getZeroxPrice({
+      tokenIn: resolvedTokenIn,
+      tokenOut,
       amount: amountNum,
-      slippage: slippage,
-      taker: taker,
+      slippage,
+      taker,
     });
 
-    if (!quote.success) {
-      console.error('0x quote failed:', quote.error);
+    if (!quote || !quote.success) {
       return NextResponse.json(
-        { error: quote.error || 'Failed to get quote from 0x' },
+        { error: '0x API failed to return a quote. Please try again.' },
         { status: 500, headers: CORS_HEADERS }
       );
     }
@@ -125,10 +115,11 @@ export async function GET(request) {
       success: true,
       amountOut: quote.buyAmount,
       amountOutRaw: quote.buyAmountRaw,
+      outDecimals: quote.outDecimals,
       priceImpact: 0,
       route: ['0x Aggregator'],
       bestRoute: {
-        router: quote.to || '0x',
+        router: '0x',
         dexName: '0x Aggregator',
         percent: 100,
       },
@@ -137,18 +128,12 @@ export async function GET(request) {
         dexLogo: null,
         receiveAmount: quote.buyAmount,
         tradeFee: amountNum * 0.003,
-        routerAddress: quote.to || '0x',
+        routerAddress: '0x',
         percent: 100,
       }],
       estimatedGas: quote.estimatedGas,
       source: '0x',
       fees: quote.fees,
-      transactionData: {
-        to: quote.to,
-        data: quote.data,
-        value: quote.value,
-        gas: quote.estimatedGas,
-      },
       timestamp: Date.now(),
     };
 

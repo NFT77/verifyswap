@@ -1,10 +1,12 @@
-// 0x API Swap Execute Route - Returns transaction for wallet signing
+// app/api/swap/execute/route.js
+// Powered by 0x API v2 permit2 — OKX and Uniswap removed entirely
 
 import { NextResponse } from 'next/server';
-import { getZeroxQuote, WETH_ADDRESS } from '@/lib/api/zerox';
+import { getZeroxQuote, getTokenDecimals } from '@/lib/api/zerox';
 
 const FEE_RECIPIENT = '0x462be091Ef7Cfae820bb032a3cf2729fcAaD6e47';
 const FEE_PERCENT = 0.3;
+const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -53,7 +55,7 @@ export async function POST(request) {
 
   if (chain !== 'base') {
     return NextResponse.json(
-      { error: 'Only Base chain is supported' },
+      { error: 'Only base chain is supported' },
       { status: 400, headers: CORS_HEADERS }
     );
   }
@@ -68,60 +70,59 @@ export async function POST(request) {
 
   const slippagePercent = parseFloat(slippage) || 0.5;
 
-  // Calculate platform fee
+  // Platform fee deducted from sell amount
   const feeAmount = amountNum * (FEE_PERCENT / 100);
   const amountAfterFee = amountNum - feeAmount;
 
-  // Resolve ETH to WETH for 0x API
+  // Resolve ETH → WETH for 0x API
   const resolvedTokenIn = tokenIn === 'ETH' ? WETH_ADDRESS : tokenIn;
-  const resolvedTokenOut = tokenOut === 'ETH' ? WETH_ADDRESS : tokenOut;
 
-  console.log(`[0x Execute] ${amountAfterFee} ${tokenIn} → ${tokenOut} | User: ${userAddress}`);
-  console.log(`[0x Execute] Fee: ${feeAmount} (${FEE_PERCENT}%) → ${FEE_RECIPIENT}`);
+  console.log(`0x Swap: ${amountAfterFee} ${tokenIn} → ${tokenOut} | user: ${userAddress}`);
+  console.log(`Fee: ${feeAmount} (${FEE_PERCENT}%) → ${FEE_RECIPIENT}`);
 
   try {
-    // Get firm quote with transaction data
+    // Get firm quote with permit2 transaction data
     const quote = await getZeroxQuote({
       tokenIn: resolvedTokenIn,
-      tokenOut: resolvedTokenOut,
+      tokenOut,
       amount: amountAfterFee,
       slippage: slippagePercent,
       taker: userAddress,
     });
 
-    if (!quote.success) {
-      console.error('0x quote failed:', quote.error);
+    if (!quote || !quote.success) {
       return NextResponse.json(
-        { error: quote.error || 'Failed to get quote from 0x' },
+        { error: '0x API failed to return a firm quote. Please try again.' },
         { status: 500, headers: CORS_HEADERS }
       );
     }
 
-    if (!quote.to || !quote.data) {
-      console.error('0x missing transaction data');
+    if (!quote.transaction) {
       return NextResponse.json(
-        { error: '0x API did not return transaction data' },
+        { error: '0x did not return transaction data. Please try again.' },
         { status: 500, headers: CORS_HEADERS }
       );
     }
 
-    // Return transaction data for wallet signing
+    // Return transaction + permit2 data to client for wallet signing
     return NextResponse.json(
       serializeBigInt({
         success: true,
-        transaction: {
-          to: quote.to,
-          data: quote.data,
-          value: quote.value || '0',
-          gas: quote.estimatedGas ? parseInt(quote.estimatedGas) : undefined,
-        },
+        // The client should:
+        // 1. If quote.approval exists → send approval tx first
+        // 2. If quote.permit2 exists → sign the permit2 message
+        // 3. Send quote.transaction via wallet
+        transaction: quote.transaction,
+        permit2: quote.permit2 || null,
+        approval: quote.approval || null,
         buyAmount: quote.buyAmount,
         buyAmountRaw: quote.buyAmountRaw,
-        feeAmount: feeAmount,
+        outDecimals: quote.outDecimals,
+        feeAmount,
         feePercent: FEE_PERCENT,
         feeRecipient: FEE_RECIPIENT,
         source: '0x',
-        message: `Swap ${amountAfterFee} ${tokenIn} → ${tokenOut} via 0x. Fee: ${FEE_PERCENT}%`,
+        message: `Swap ${amountAfterFee} ${tokenIn} → ${tokenOut} via 0x. Fee: ${FEE_PERCENT}% (${feeAmount.toFixed(6)})`,
       }),
       { headers: CORS_HEADERS }
     );
