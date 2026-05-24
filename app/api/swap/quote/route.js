@@ -2,7 +2,7 @@
 // Powered by 0x API v2 — OKX and Uniswap removed entirely
 
 import { NextResponse } from 'next/server';
-import { getZeroxPrice, getTokenDecimals } from '@/lib/api/zerox';
+import { getZeroxPrice, getTokenDecimals, NATIVE_ETH_ADDRESS } from '@/lib/api/zerox';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -86,8 +86,8 @@ export async function GET(request) {
     return NextResponse.json({ error: 'Invalid tokenOut' }, { status: 400, headers: CORS_HEADERS });
   }
 
-  // Resolve ETH → WETH for 0x API
-  const resolvedTokenIn = tokenIn === 'ETH' ? WETH_ADDRESS : tokenIn;
+  // ✅ 0x API v2 uses sentinel address for native ETH, not WETH
+  const resolvedTokenIn = tokenIn === 'ETH' ? NATIVE_ETH_ADDRESS : tokenIn;
 
   const cacheKey = getCacheKey(resolvedTokenIn, tokenOut, amount, slippage);
   const cached = getCachedQuote(cacheKey);

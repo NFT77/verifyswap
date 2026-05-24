@@ -2,11 +2,10 @@
 // Powered by 0x API v2 permit2 — OKX and Uniswap removed entirely
 
 import { NextResponse } from 'next/server';
-import { getZeroxQuote, getTokenDecimals } from '@/lib/api/zerox';
+import { getZeroxQuote, getTokenDecimals, NATIVE_ETH_ADDRESS } from '@/lib/api/zerox';
 
 const FEE_RECIPIENT = '0x462be091Ef7Cfae820bb032a3cf2729fcAaD6e47';
 const FEE_PERCENT = 0.3;
-const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -74,8 +73,8 @@ export async function POST(request) {
   const feeAmount = amountNum * (FEE_PERCENT / 100);
   const amountAfterFee = amountNum - feeAmount;
 
-  // Resolve ETH → WETH for 0x API
-  const resolvedTokenIn = tokenIn === 'ETH' ? WETH_ADDRESS : tokenIn;
+  // ✅ 0x API v2 uses sentinel address for native ETH, not WETH
+  const resolvedTokenIn = tokenIn === 'ETH' ? NATIVE_ETH_ADDRESS : tokenIn;
 
   console.log(`0x Swap: ${amountAfterFee} ${tokenIn} → ${tokenOut} | user: ${userAddress}`);
   console.log(`Fee: ${feeAmount} (${FEE_PERCENT}%) → ${FEE_RECIPIENT}`);
