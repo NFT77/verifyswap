@@ -1,4 +1,5 @@
 // app/api/search/route.js
+
 import { NextResponse } from 'next/server';
 import { verifyTokenContract } from '@/lib/api/etherscan';
 import { searchTokenOnCoinGecko } from '@/lib/api/coingecko';
@@ -164,8 +165,8 @@ async function getSecurityData(address, chain) {
     result.riskFactors = g.riskFactors || [];
     result.riskLevel = g.riskLevel || 'unknown';
   } else {
-    console.error('GoPlus failed:', goplusResult.reason?.message);
-    result.riskFactors.push('Security check unavailable');
+    console.error('GoPlus failed:', goplusResult.reason?.message || 'Unknown error');
+    result.riskFactors.push('Security check temporarily unavailable');
   }
 
   if (etherscanResult.status === 'fulfilled' && etherscanResult.value) {
@@ -199,7 +200,6 @@ function calculateTrustScore(security, token) {
   return 25;
 }
 
-// ============ FARCASTER USERNAME LOOKUP YANG ROBUST UNTUK MINI APP ============
 async function getFarcasterProfileRobust(username, viewerFid = null) {
   if (!NEYNAR_API_KEY) return null;
   
@@ -221,7 +221,7 @@ async function getFarcasterProfileRobust(username, viewerFid = null) {
     console.log('by_username error:', err.message);
   }
   
-  // Strategy 2: Search dengan viewer_fid (jika tersedia)
+  // Strategy 2: Search dengan viewer_fid
   try {
     let searchUrl = `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(cleanUsername)}&limit=10`;
     if (viewerFid) {
@@ -238,10 +238,8 @@ async function getFarcasterProfileRobust(username, viewerFid = null) {
       const data = await searchRes.json();
       const users = data.result?.users || [];
       
-      // Cari exact match (case insensitive)
       let user = users.find(u => u.username?.toLowerCase() === cleanUsername);
       
-      // Jika tidak ada exact match, ambil yang follower terbanyak
       if (!user && users.length > 0) {
         user = users.sort((a, b) => (b.follower_count || 0) - (a.follower_count || 0))[0];
       }
@@ -252,7 +250,7 @@ async function getFarcasterProfileRobust(username, viewerFid = null) {
     console.log('search error:', err.message);
   }
   
-  // Strategy 3: Bulk lookup by username (fallback tambahan)
+  // Strategy 3: Bulk lookup
   try {
     const bulkUrl = `https://api.neynar.com/v2/farcaster/user/bulk?usernames=${cleanUsername}`;
     const bulkRes = await fetchWithTimeout(
@@ -272,7 +270,6 @@ async function getFarcasterProfileRobust(username, viewerFid = null) {
   return null;
 }
 
-// Legacy function untuk kompatibilitas (panggil yang robust)
 async function getFarcasterProfile(query, byFid = false) {
   if (byFid) {
     if (!NEYNAR_API_KEY) return null;
@@ -293,7 +290,6 @@ async function getFarcasterProfile(query, byFid = false) {
     }
   }
   
-  // Untuk username, panggil fungsi robust
   return getFarcasterProfileRobust(query);
 }
 
@@ -387,18 +383,15 @@ export async function GET(request) {
       );
     }
 
-    // ========== CEK USERNAME (dengan multiple fallback strategies) ==========
+    // CEK USERNAME
     const cleanUsername = trimmed.replace('@', '');
     if (cleanUsername.length > 0 && cleanUsername.length <= 50) {
-      // Coba dengan viewer_fid = null dulu
       let profile = await getFarcasterProfileRobust(cleanUsername);
       
-      // Jika gagal, coba dengan viewer_fid = 3 (FID warpcaster)
       if (!profile) {
         profile = await getFarcasterProfileRobust(cleanUsername, 3);
       }
       
-      // Jika tetap gagal, coba dengan viewer_fid = 2
       if (!profile) {
         profile = await getFarcasterProfileRobust(cleanUsername, 2);
       }

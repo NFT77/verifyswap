@@ -1,16 +1,47 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 
 export default function SearchBar({ onSearch, isLoading, placeholder, recentSearches = [] }) {
   const [query, setQuery] = useState('');
   const [isFocused, setIsFocused] = useState(false);
+  const [cooldown, setCooldown] = useState(false);
   const inputRef = useRef(null);
+  const debounceTimerRef = useRef(null);
+  const abortControllerRef = useRef(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, []);
+
+  const handleSearch = useCallback((searchQuery) => {
+    if (!searchQuery?.trim() || isLoading || cooldown) return;
+
+    // Cancel previous request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Create new abort controller
+    abortControllerRef.current = new AbortController();
+    
+    // Execute search
+    onSearch(searchQuery.trim(), abortControllerRef.current.signal);
+    
+    // Set cooldown to prevent spam (2 seconds)
+    setCooldown(true);
+    setTimeout(() => setCooldown(false), 2000);
+  }, [onSearch, isLoading, cooldown]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (query.trim() && !isLoading) {
-      onSearch(query.trim());
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    if (query.trim() && !isLoading && !cooldown) {
+      handleSearch(query.trim());
       setQuery('');
       inputRef.current?.blur();
     }
@@ -22,9 +53,29 @@ export default function SearchBar({ onSearch, isLoading, placeholder, recentSear
   };
 
   const handleRecentSearchClick = (searchTerm) => {
+    if (cooldown) return;
     setQuery(searchTerm);
-    onSearch(searchTerm);
+    handleSearch(searchTerm);
     setIsFocused(false);
+  };
+
+  // Debounced input change (optional: auto-search on type)
+  const handleInputChange = (e) => {
+    const newValue = e.target.value;
+    setQuery(newValue);
+    
+    // Clear previous debounce timer
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    
+    // Optional: auto-search after user stops typing (500ms)
+    // Comment out if you want manual search only
+    if (newValue.trim().length > 2) {
+      debounceTimerRef.current = setTimeout(() => {
+        if (newValue.trim() && !isLoading && !cooldown) {
+          handleSearch(newValue.trim());
+        }
+      }, 500);
+    }
   };
 
   return (
@@ -39,12 +90,12 @@ export default function SearchBar({ onSearch, isLoading, placeholder, recentSear
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={handleInputChange}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setTimeout(() => setIsFocused(false), 200)}
             placeholder={placeholder || "Search by Token Address, FID, or Username..."}
             className="w-full pl-12 pr-24 py-4 bg-black/40 backdrop-blur-sm border border-white/20 rounded-2xl text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all duration-200 text-lg"
-            disabled={isLoading}
+            disabled={isLoading || cooldown}
           />
 
           {query && !isLoading && (
@@ -61,15 +112,17 @@ export default function SearchBar({ onSearch, isLoading, placeholder, recentSear
 
           <button
             type="submit"
-            disabled={!query.trim() || isLoading}
+            disabled={!query.trim() || isLoading || cooldown}
             className={`absolute inset-y-0 right-2 my-1.5 px-5 rounded-xl font-medium transition-all duration-200 ${
-              query.trim() && !isLoading
+              query.trim() && !isLoading && !cooldown
                 ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:opacity-90 active:scale-[0.98]'
                 : 'bg-gray-600/50 text-gray-400 cursor-not-allowed'
             }`}
           >
             {isLoading ? (
               <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : cooldown ? (
+              '⏳ Wait'
             ) : (
               'Search'
             )}
@@ -77,7 +130,7 @@ export default function SearchBar({ onSearch, isLoading, placeholder, recentSear
         </div>
       </form>
 
-      {/* Recent Searches Dropdown — no AnimatePresence, plain conditional render */}
+      {/* Recent Searches Dropdown */}
       {isFocused && recentSearches.length > 0 && !isLoading && (
         <div className="absolute z-50 mt-2 w-full bg-black/90 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden shadow-xl">
           <div className="p-2">
@@ -110,6 +163,14 @@ export default function SearchBar({ onSearch, isLoading, placeholder, recentSear
           <div className="inline-flex items-center gap-2 px-3 py-1 bg-black/50 rounded-full text-xs text-gray-400">
             <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse"></div>
             Searching...
+          </div>
+        </div>
+      )}
+      
+      {cooldown && !isLoading && (
+        <div className="mt-2 text-center">
+          <div className="inline-flex items-center gap-2 px-3 py-1 bg-black/50 rounded-full text-xs text-gray-500">
+            ⏳ Please wait 2 seconds before searching again
           </div>
         </div>
       )}

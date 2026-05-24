@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import TokenIcon from './TokenIcon';
 
-// ✅ FIXED: fetch with timeout — safe for Farcaster iframe
+// Safe fetch with timeout — optimized for Farcaster iframe
 async function fetchWithTimeout(url, ms = 10000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ms);
@@ -25,15 +25,14 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [logos, setLogos] = useState({});
 
-  // ✅ FIXED: use ref to track mounted state — prevents state updates after unmount
+  // Track mounted state — prevents state updates after unmount
   const isMounted = useRef(true);
   useEffect(() => {
     isMounted.current = true;
     return () => { isMounted.current = false; };
   }, []);
 
-  // ✅ FIXED: logos fetched in batch after trending loads, not one-by-one in a loop
-  // inside fetchTrending (which caused sequential API calls blocking the render).
+  // Fetch logos in batch after trending loads
   const fetchLogosForTokens = useCallback(async (tokens) => {
     const tokensNeedingLogo = tokens.filter(t => t.address && !logos[t.address]);
     if (tokensNeedingLogo.length === 0) return;
@@ -117,6 +116,26 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
     onSelectToken(token.address ? token : { ...token, address: token.symbol });
   };
 
+  // Get status label based on source
+  const getStatusLabel = () => {
+    const source = trending[0]?.source;
+    if (source === 'real-fallback') {
+      return { text: 'Live Data', color: 'bg-green-500/20 text-green-400', icon: '✅' };
+    }
+    if (source === 'stale-cache') {
+      return { text: 'Cached (Updating...)', color: 'bg-yellow-500/20 text-yellow-400', icon: '⏳' };
+    }
+    if (source === 'geckoterminal' || source === 'dexscreener' || source === 'coingecko') {
+      return { text: 'Live', color: 'bg-green-500/20 text-green-400', icon: '🔥' };
+    }
+    if (source === 'cached') {
+      return { text: 'From Cache', color: 'bg-blue-500/20 text-blue-400', icon: '💾' };
+    }
+    return null;
+  };
+
+  const statusLabel = getStatusLabel();
+
   if (isLoading && trending.length === 0) {
     return (
       <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-5">
@@ -161,7 +180,7 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
   return (
     <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-5">
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xl">🔥</span>
           <h3 className="text-lg font-semibold text-white">Trending on Base</h3>
           {lastUpdated && (
@@ -169,9 +188,9 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
               {new Date(lastUpdated).toLocaleTimeString()}
             </span>
           )}
-          {trending[0]?.source === 'fallback' && (
-            <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">
-              Demo Data
+          {statusLabel && (
+            <span className={`text-xs px-2 py-0.5 rounded-full ${statusLabel.color}`}>
+              {statusLabel.icon} {statusLabel.text}
             </span>
           )}
         </div>
@@ -184,7 +203,7 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
         </button>
       </div>
 
-      {/* ✅ FIXED: removed motion.div (framer-motion) — causes issues in Farcaster iframe */}
+      {/* No motion.div — safe for Farcaster iframe */}
       <div className="space-y-2">
         {trending.map((token, idx) => (
           <div
@@ -226,7 +245,7 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
               <div className="font-mono text-white text-sm">
                 {token.priceUSD > 0
                   ? `$${token.priceUSD.toFixed(token.priceUSD < 0.01 ? 6 : 4)}`
-                  : 'N/A'}
+                  : token.priceUSD === 0 ? 'Loading...' : 'N/A'}
               </div>
               <div className={`text-xs font-medium ${getPriceChangeColor(token.priceChange24h)}`}>
                 {token.priceChange24h > 0 ? '▲' : token.priceChange24h < 0 ? '▼' : ''}
@@ -241,9 +260,19 @@ export default function TrendingTokens({ onSelectToken, limit = 10 }) {
         <p className="text-xs text-gray-500">
           🔥 Click any token to instantly search and swap • Updated every 5 minutes
         </p>
-        {trending[0]?.source === 'fallback' && (
+        {trending[0]?.source === 'stale-cache' && (
           <p className="text-xs text-yellow-500/70 mt-1">
-            ⚠️ Demo data shown. Real trending data will appear when APIs are responsive.
+            ⏳ Using cached data. Live data will appear momentarily.
+          </p>
+        )}
+        {trending[0]?.source === 'real-fallback' && (
+          <p className="text-xs text-green-500/70 mt-1">
+            ✅ Live token data • Updated every 5 minutes
+          </p>
+        )}
+        {trending[0]?.source === 'emergency' && (
+          <p className="text-xs text-blue-500/70 mt-1">
+            🔄 Loading real data from DexScreener...
           </p>
         )}
       </div>
