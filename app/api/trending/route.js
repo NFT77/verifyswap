@@ -12,9 +12,14 @@ export async function OPTIONS() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
+// Cache configuration
 let cache = null;
 let cacheTime = null;
-const CACHE_TTL = 5 * 60 * 1000;
+const CACHE_TTL = 5 * 60 * 1000; // 5 menit
+
+// Flag untuk mencegah multiple refresh bersamaan
+let isRefreshing = false;
+let refreshPromise = null;
 
 // ==================== DAFTAR TOKEN VALID (LENGKAP) ====================
 const VALID_TOKENS = [
@@ -77,7 +82,6 @@ async function fetchWithTimeout(url, ms = 8000) {
 async function fetchAllTokenPrices(limit = 10) {
   const results = [];
   
-  // Ambil semua token, nanti akan di-sort berdasarkan volume/likuiditas
   for (const token of VALID_TOKENS) {
     try {
       const url = `https://api.dexscreener.com/latest/dex/tokens/${token.address}`;
@@ -91,7 +95,6 @@ async function fetchAllTokenPrices(limit = 10) {
       
       if (res.ok) {
         const data = await res.json();
-        // Cari pair yang paling likuid di Base
         const basePairs = data.pairs?.filter(p => p.chainId === 'base') || [];
         const bestPair = basePairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
         
@@ -131,19 +134,57 @@ async function fetchAllTokenPrices(limit = 10) {
     }
   }
   
-  // Urutkan berdasarkan volume + likuiditas (token paling aktif di atas)
+  // Urutkan berdasarkan volume + likuiditas
   const sorted = results.sort((a, b) => {
     const scoreA = (a.volume24h || 0) + (a.liquidityUSD || 0);
     const scoreB = (b.volume24h || 0) + (b.liquidityUSD || 0);
     return scoreB - scoreA;
   });
   
-  // Kembalikan hanya token yang memiliki volume > 0 atau likuiditas > 0
-  // Tapi tetap tampilkan top N meskipun ada yang 0
   return sorted.slice(0, limit);
 }
 
-// ========== AMBIL DARI GECKOTERMINAL (FALLBACK) ==========
+// ========== FUNGSI REFRESH CACHE DI BACKGROUND ==========
+async function refreshCache(limit) {
+  if (isRefreshing) {
+    console.log('Refresh already in progress, waiting...');
+    return refreshPromise;
+  }
+  
+  isRefreshing = true;
+  refreshPromise = (async () => {
+    try {
+      console.log('🔄 Refreshing cache in background...');
+      
+      // Coba GeckoTerminal dulu
+      let tokens = await fetchFromGeckoTerminal(limit);
+      let source = 'geckoterminal';
+      
+      // Jika gagal, ambil dari token list
+      if (!tokens || tokens.length === 0) {
+        console.log('Fetching prices from DexScreener...');
+        tokens = await fetchAllTokenPrices(limit);
+        source = 'tokenlist';
+      }
+      
+      if (tokens && tokens.length > 0) {
+        cache = tokens;
+        cacheTime = Date.now();
+        console.log(`✅ Cache updated with ${tokens.length} tokens from ${source}`);
+      } else {
+        console.log('⚠️ Failed to refresh cache, keeping old data');
+      }
+    } catch (err) {
+      console.error('Background refresh failed:', err);
+    } finally {
+      isRefreshing = false;
+    }
+  })();
+  
+  return refreshPromise;
+}
+
+// ========== AMBIL DARI GECKOTERMINAL ==========
 async function fetchFromGeckoTerminal(limit) {
   try {
     const res = await fetchWithTimeout(
@@ -183,54 +224,103 @@ async function fetchFromGeckoTerminal(limit) {
   }
 }
 
-// ========== MAIN HANDLER ==========
+// ========== MAIN HANDLER DENGAN STALE-WHILE-REVALIDATE ==========
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const limit = Math.min(parseInt(searchParams.get('limit') || '7'), 20);
   const forceRefresh = searchParams.get('refresh') === 'true';
 
-  // Cek cache
-  if (!forceRefresh && cache && cacheTime && (Date.now() - cacheTime) < CACHE_TTL) {
+  // KASUS 1: Force refresh (panggilan manual dari tombol)
+  if (forceRefresh) {
+    console.log('Force refresh requested');
+    await refreshCache(limit);
+    if (cache) {
+      return NextResponse.json({
+        success: true,
+        trending: cache.slice(0, limit),
+        timestamp: cacheTime,
+        source: 'cache-refreshed',
+      }, { headers: CORS_HEADERS });
+    }
+  }
+
+  // KASUS 2: Cache masih fresh → kirim data instan
+  if (cache && cacheTime && (Date.now() - cacheTime) < CACHE_TTL) {
+    // Trigger background refresh jika cache akan kadaluarsa dalam 60 detik
+    const timeLeft = CACHE_TTL - (Date.now() - cacheTime);
+    if (timeLeft < 60000 && !isRefreshing) {
+      console.log('Cache expiring soon, triggering background refresh');
+      refreshCache(limit).catch(console.error);
+    }
+    
     return NextResponse.json({
       success: true,
       trending: cache.slice(0, limit),
       timestamp: cacheTime,
       source: 'cache',
-    }, { headers: CORS_HEADERS });
+    }, { 
+      headers: {
+        ...CORS_HEADERS,
+        'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=60',
+      }
+    });
   }
 
+  // KASUS 3: Cache tidak ada atau sudah kadaluarsa
+  // Kirim data stale dulu (kalau ada) sambil refresh di background
+  const staleData = cache && cache.length > 0 ? cache : null;
+  
+  if (staleData) {
+    // Trigger background refresh tanpa await
+    refreshCache(limit).catch(console.error);
+    
+    // Langsung kirim data stale
+    return NextResponse.json({
+      success: true,
+      trending: staleData.slice(0, limit),
+      timestamp: cacheTime || Date.now(),
+      source: 'stale-cache',
+    }, { 
+      headers: {
+        ...CORS_HEADERS,
+        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120',
+      }
+    });
+  }
+
+  // KASUS 4: Tidak ada cache sama sekali (first load)
   try {
+    console.log('No cache available, fetching fresh data...');
+    
     let tokens = null;
     let source = '';
 
-    // 1. Coba GeckoTerminal dulu (trending real-time)
     tokens = await fetchFromGeckoTerminal(limit);
     if (tokens && tokens.length >= 3) {
       source = 'geckoterminal';
     }
 
-    // 2. Jika gagal, ambil dari daftar token valid dengan harga real
     if (!tokens || tokens.length === 0) {
-      console.log('Fetching prices for all valid tokens...');
+      console.log('Fetching prices from DexScreener...');
       tokens = await fetchAllTokenPrices(limit);
       source = 'tokenlist';
     }
 
-    // Update cache
-    cache = tokens;
-    cacheTime = Date.now();
+    if (tokens && tokens.length > 0) {
+      cache = tokens;
+      cacheTime = Date.now();
+    }
 
     return NextResponse.json({
       success: true,
-      trending: tokens,
-      timestamp: cacheTime,
-      source,
+      trending: tokens || VALID_TOKENS.slice(0, limit),
+      timestamp: cacheTime || Date.now(),
+      source: source || 'initial',
     }, { headers: CORS_HEADERS });
 
   } catch (error) {
     console.error('Trending API error:', error);
     
-    // Emergency: ambil dari token list tanpa harga
     const emergencyTokens = VALID_TOKENS.slice(0, limit).map(t => ({
       ...t,
       priceUSD: 0,
